@@ -1,0 +1,10 @@
+models/*
+!models/.gitkeep
+data/chroma/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+*.gguf
+*.bin
+*.safetensors
