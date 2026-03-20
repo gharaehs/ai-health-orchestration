@@ -104,13 +104,13 @@ vLLM API (port 8000)          ← OpenAI-compatible REST API
 
 **GPU Memory Usage (Llama 3.1 8B fp16 via vLLM):**
 
-| Component | VRAM Used |
-|-----------|-----------|
-| Llama 3.1 8B (fp16, on-the-fly quantization) | ~8.5 GB |
-| KV Cache (PagedAttention) | ~5.0 GB |
-| System overhead | ~0.5 GB |
-| Safety buffer (15%) | ~2.0 GB |
-| **Total available** | **15.36 GB** |
+| Component | VRAM Used    |
+|-----------|--------------|
+| Llama 3.1 8B (bitsandbytes 4-bit) | ~5.65 GB     |
+| KV Cache (PagedAttention) | ~6.8 GB      |
+| System overhead | ~0.5 GB      |
+| Safety buffer (15%) | ~2.1 GB      |
+| **Total available** | **14.58 GB** |
 
 ---
 
@@ -168,6 +168,7 @@ ai-health-orchestration/
   - `--gpu-memory-utilization 0.85` — reserves 15% VRAM as safety buffer
   - `--max-num-seqs 8` — limits concurrent sequences
   - `--enforce-eager` — disables CUDA graph capture (required for T4, prevents OOM)
+  - `--quantization bitsandbytes` + `--load-format bitsandbytes` — loads fp16 weights and quantizes to 4-bit on the fly, bringing VRAM usage from ~16 GB to ~5.65 GB
 
 > **Why `--enforce-eager`?**
 > The T4 GPU (CUDA compute capability 7.5) struggles with vLLM's default CUDA graph warmup which tries to capture 512 graph sizes simultaneously, causing an OOM crash. `--enforce-eager` disables this. It's slightly slower for high-throughput scenarios but works perfectly for development and single-user inference.
