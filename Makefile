@@ -23,5 +23,5 @@ logs:
 test-llm:
 	curl -s http://localhost:8000/v1/chat/completions \
 	  -H "Content-Type: application/json" \
-	  -d '{"model": "/models/mistral", "messages": [{"role": "user", "content": "Say hello!"}], "max_tokens": 50}' \
+	  -d '{"model": "/models/llama", "messages": [{"role": "user", "content": "Say hello!"}], "max_tokens": 50}' \
 	  | python3 -m json.tool

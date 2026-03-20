@@ -7,6 +7,8 @@ FROM vllm/vllm-openai:latest
 ENV MODEL_PATH=/models/llama
 
 CMD ["--model", "/models/llama", \
+     "--quantization", "bitsandbytes", \
+     "--load-format", "bitsandbytes", \
      "--max-model-len", "8192", \
      "--gpu-memory-utilization", "0.85", \
      "--max-num-seqs", "8", \
