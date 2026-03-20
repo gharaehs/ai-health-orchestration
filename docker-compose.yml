@@ -1,16 +1,10 @@
-version: '3.8'
-
 services:
   llm:
     build: ./services/llm
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-    volumes:
-      - ./models:/models
     ports:
       - "8000:8000"
+    volumes:
+      - ./models/llama:/models/llama
     deploy:
       resources:
         reservations:
@@ -22,9 +16,8 @@ services:
 
   vector-db:
     image: chromadb/chroma:latest
-    volumes:
-      - ./data/chroma:/chroma/chroma
     ports:
       - "8001:8000"
+    volumes:
+      - ./data/chroma:/chroma/chroma
     restart: unless-stopped
-

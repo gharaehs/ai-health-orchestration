@@ -1,12 +1,14 @@
 FROM vllm/vllm-openai:latest
 
-WORKDIR /app
+# Mount point for the model (loaded at runtime via volume)
+# Model: meta-llama/Meta-Llama-3.1-8B-Instruct (fp16)
+# Located at: ./models/llama/ on the host
 
-CMD ["--model", "/models/mistral", \
-     "--quantization", "awq", \
-     "--max-model-len", "4096", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
+ENV MODEL_PATH=/models/llama
+
+CMD ["--model", "/models/llama", \
+     "--max-model-len", "8192", \
      "--gpu-memory-utilization", "0.85", \
      "--max-num-seqs", "8", \
-     "--enforce-eager"]
+     "--enforce-eager", \
+     "--dtype", "float16"]
