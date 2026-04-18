@@ -2,7 +2,7 @@
 
 > A modular, production-style AI system that ingests structured health data and user goals to generate grounded, structured outputs including weekly meal plans, grocery lists, and gym programs.
 
-Built as part of the **AI Technical Deep Dive** mentorship program at diconium.
+Built as part of the **AI Technical Deep Dive** mentorship program.
 
 ---
 
@@ -683,7 +683,7 @@ ChromaDB offers a persistent server with a REST API, making it accessible across
 ## Links
 
 - **GitHub Repository:** https://github.com/gharaehs/ai-health-orchestration
-- **Mentorship Program:** AI Technical Deep Dive — diconium
+- **Mentorship Program:** AI Technical Deep Dive
 - **Model:** https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
 - **vLLM Documentation:** https://docs.vllm.ai
 - **ChromaDB Documentation:** https://docs.trychroma.com
