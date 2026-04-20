@@ -15,3 +15,5 @@ data/corpus/
 # See scripts/ingest.py for details
 data/corpus/**
 !data/corpus/**/.gitkeep
+.idea/
+training/evaluation_results.json
