@@ -8,3 +8,10 @@ __pycache__/
 *.gguf
 *.bin
 *.safetensors
+data/corpus/
+
+# Corpus data files (PDFs, CSVs) - large binary files, not version controlled
+# Run the ingestion pipeline to populate these from your local corpus
+# See scripts/ingest.py for details
+data/corpus/**
+!data/corpus/**/.gitkeep
