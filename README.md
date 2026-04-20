@@ -16,6 +16,7 @@ Built as part of the **AI Technical Deep Dive** mentorship program.
 - [Prerequisites](#prerequisites)
 - [Fresh Server Setup Guide](#fresh-server-setup-guide)
 - [Model Download](#model-download)
+- [RAG Corpus Ingestion](#rag-corpus-ingestion)
 - [Running the System](#running-the-system)
 - [Testing & Verification](#testing--verification)
 - [Makefile Reference](#makefile-reference)
@@ -34,8 +35,8 @@ This system implements a multi-module AI pipeline across 6 engineering modules:
 |--------|-------|--------|
 | Module 1 | Local LLM Deployment & Quantization | ✅ Complete |
 | Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | ✅ Complete |
-| Module 3 | Vector Database (FAISS / Chroma) | 🔜 Next |
-| Module 4 | Retrieval-Augmented Generation (RAG) | 🔜 Planned |
+| Module 3 | Vector Database & RAG Corpus Ingestion | ✅ Complete |
+| Module 4 | Retrieval-Augmented Generation (RAG) | 🔜 Next |
 | Module 5 | Agentic AI / Multi-Agent Orchestration | 🔜 Planned |
 | Module 6 | Model Context Protocol (MCP) | 🔜 Planned |
 
@@ -60,15 +61,16 @@ This system implements a multi-module AI pipeline across 6 engineering modules:
 │  │   vLLM Container     │    │    ChromaDB Container         │   │
 │  │   Port: 8000         │    │    Port: 8001                 │   │
 │  │                      │    │                               │   │
-│  │  Llama 3.1 8B        │    │  Vector Database              │   │
-│  │  Instruct (fp16)     │    │  (Semantic Memory)            │   │
-│  │  GPU: Tesla T4       │    │  Persistent Storage           │   │
-│  └──────────┬───────────┘    └──────────────────────────────┘   │
-│             │                                                    │
-│             ▼                                                    │
+│  │  Llama 3.1 8B        │    │  4 Collections (13,349 docs)  │   │
+│  │  Instruct (fp16)     │    │  - public_health_recs         │   │
+│  │  GPU: Tesla T4       │    │  - nutrition_guidelines       │   │
+│  └──────────┬───────────┘    │  - gym_programming            │   │
+│             │                │  - food_and_recipes           │   │
+│             ▼                └──────────────────────────────┘   │
 │    ./models/llama/       (mounted volume, not in git)           │
 │    ./models/adapters/    (LoRA adapters, not in git)            │
 │    ./data/chroma/        (mounted volume, not in git)           │
+│    ./data/corpus/        (corpus files, not in git)             │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -82,7 +84,11 @@ User Query
 vLLM API (port 8000)          ← OpenAI-compatible REST API
     │
     ├── Module 3+: Query ChromaDB (port 8001) for relevant context
-    │       └── RAG: Augment prompt with retrieved documents
+    │       ├── public_health_recommendations  ← Lab markers, clinical thresholds
+    │       ├── nutrition_guidelines           ← Macros, DRIs, dietary patterns
+    │       ├── gym_programming                ← Rep ranges, periodization
+    │       └── food_and_recipes               ← Recipes + USDA nutrient data
+    │             └── RAG: Augment prompt with retrieved documents
     │
     └── Generate structured JSON response
 ```
@@ -104,12 +110,12 @@ vLLM API (port 8000)          ← OpenAI-compatible REST API
 
 **GPU Memory Usage (Llama 3.1 8B fp16 via vLLM):**
 
-| Component | VRAM Used    |
-|-----------|--------------|
-| Llama 3.1 8B (bitsandbytes 4-bit) | ~5.65 GB     |
-| KV Cache (PagedAttention) | ~6.8 GB      |
-| System overhead | ~0.5 GB      |
-| Safety buffer (15%) | ~2.1 GB      |
+| Component | VRAM Used |
+|-----------|-----------|
+| Llama 3.1 8B (bitsandbytes 4-bit) | ~5.65 GB |
+| KV Cache (PagedAttention) | ~6.8 GB |
+| System overhead | ~0.5 GB |
+| Safety buffer (15%) | ~2.1 GB |
 | **Total available** | **14.58 GB** |
 
 ---
@@ -129,7 +135,8 @@ ai-health-orchestration/
 │       └── Dockerfile              # vLLM container configuration
 │
 ├── scripts/
-│   └── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
+│   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
+│   └── ingest.py                   # Module 3: RAG corpus ingestion pipeline
 │
 ├── training/
 │   ├── train.py                    # QLoRA fine-tuning script
@@ -146,11 +153,16 @@ ai-health-orchestration/
 │       └── health-v1/              # LoRA adapter from Module 2 (~161 MB)
 │
 └── data/
-    └── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
+    ├── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
+    └── corpus/                     # ⚠️ NOT IN GIT — raw corpus files for ingestion
+        ├── public_health_recommendations/   # Lab reference ranges, clinical guidelines
+        ├── nutrition_guidelines/            # DRI tables, JISSN position stands, WHO guidelines
+        ├── gym_programming/                 # ACSM/NSCA position stands, meta-analyses
+        └── food_and_recipes/               # All_Diets.csv + USDA FoodData Central CSVs
 ```
 
-> **Why are models not in git?**
-> Model files are 15+ GB. They are excluded from git intentionally. The `scripts/download_model.sh` script recreates them on any new server.
+> **Why are corpus files not in git?**
+> Corpus files include large PDFs and multi-GB USDA CSV datasets. They are excluded intentionally. Run `scripts/ingest.py` after placing corpus files in `data/corpus/` to re-populate ChromaDB on a new server.
 
 ---
 
@@ -168,19 +180,18 @@ ai-health-orchestration/
   - `--gpu-memory-utilization 0.85` — reserves 15% VRAM as safety buffer
   - `--max-num-seqs 8` — limits concurrent sequences
   - `--enforce-eager` — disables CUDA graph capture (required for T4, prevents OOM)
-  - `--quantization bitsandbytes` + `--load-format bitsandbytes` — loads fp16 weights and quantizes to 4-bit on the fly, bringing VRAM usage from ~16 GB to ~5.65 GB
+  - `--quantization bitsandbytes` + `--load-format bitsandbytes` — loads fp16 weights and quantizes to 4-bit on the fly
 
 > **Why `--enforce-eager`?**
-> The T4 GPU (CUDA compute capability 7.5) struggles with vLLM's default CUDA graph warmup which tries to capture 512 graph sizes simultaneously, causing an OOM crash. `--enforce-eager` disables this. It's slightly slower for high-throughput scenarios but works perfectly for development and single-user inference.
-
-> **Why not AWQ for serving?**
-> We switched to Llama 3.1 8B fp16 as the single model for both training and serving. This eliminates the need for separate train/serve model versions. vLLM serves it efficiently with `--dtype float16` on the T4.
+> The T4 GPU (CUDA compute capability 7.5) struggles with vLLM's default CUDA graph warmup which tries to capture 512 graph sizes simultaneously, causing an OOM crash. `--enforce-eager` disables this. Slightly slower for high-throughput scenarios but works perfectly for development and single-user inference.
 
 ### Vector Database — ChromaDB
 
 - **Image:** `chromadb/chroma:latest`
+- **Version:** 1.5.8 (v2 API)
 - **Port:** `8001`
 - **Storage:** `./data/chroma/` (persisted on disk)
+- **Collections:** 4 domain-specific collections (see RAG Corpus below)
 - **Used in:** Module 3+ for semantic retrieval / RAG
 
 ---
@@ -194,7 +205,7 @@ Before running anything, the host server needs:
 3. **Docker** + **Docker Compose plugin**
 4. **NVIDIA Container Toolkit** (GPU access inside Docker)
 5. **Git**
-6. **Python 3.12 + python3.12-venv** (for model download and training scripts)
+6. **Python 3.12 + python3.12-venv** (for model download, training, and ingestion scripts)
 7. **HuggingFace account** with Meta Llama 3.1 license accepted at `huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct`
 
 ---
@@ -215,99 +226,52 @@ sudo apt update && sudo apt upgrade -y
 nvidia-smi
 ```
 
-You should see the Tesla T4 with CUDA 12.2. If drivers are missing:
-
-```bash
-sudo apt install -y ubuntu-drivers-common
-sudo ubuntu-drivers autoinstall
-sudo reboot
-# After reboot, reconnect via SSH and verify:
-nvidia-smi
-```
-
 Expected output:
 ```
 +---------------------------------------------------------------------------------------+
 | NVIDIA-SMI 535.288.01   Driver Version: 535.288.01   CUDA Version: 12.2              |
-| GPU  Name        Persistence-M | GPU Memory Usage |
-|   0  Tesla T4         Off      |  16160MiB VRAM   |
+|   0  Tesla T4         Off      |  16160MiB VRAM                                      |
 +---------------------------------------------------------------------------------------+
 ```
 
 ### Step 3 — Install Docker
 
 ```bash
-# Install prerequisites
 sudo apt install -y ca-certificates curl gnupg
-
-# Add Docker's official GPG key
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
   sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-# Add Docker repository
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
 sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# Install Docker
 sudo apt update
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-# Allow running Docker without sudo
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-Verify:
-```bash
-docker --version
-docker compose version
-```
-
 ### Step 4 — Install NVIDIA Container Toolkit
 
-This bridges Docker and the GPU — **required for vLLM to access the T4**.
-
 ```bash
-# Add NVIDIA repository
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
   sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
   sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
   sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
-# Install
 sudo apt update
 sudo apt install -y nvidia-container-toolkit
-
-# Configure Docker to use NVIDIA runtime
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
-
-Verify GPU is accessible inside Docker:
-```bash
-docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
-```
-
-You should see the same T4 output from inside the container. ✅
 
 ### Step 5 — Install Git and Configure GitHub
 
 ```bash
 sudo apt install -y git
-
 git config --global user.name "Your Name"
 git config --global user.email "your@email.com"
-
-# Generate SSH key for GitHub
 ssh-keygen -t ed25519 -C "your@email.com"
-# Press Enter for all prompts
-
-# Copy this and add to: GitHub → Settings → SSH and GPG keys → New SSH key
-cat ~/.ssh/id_ed25519.pub
+cat ~/.ssh/id_ed25519.pub   # Add to GitHub → Settings → SSH keys
 ```
 
 ### Step 6 — Install Python venv
@@ -339,23 +303,83 @@ This script will:
 2. Install `huggingface_hub`
 3. Download `meta-llama/Meta-Llama-3.1-8B-Instruct` (~15 GB) to `./models/llama/`
 
-> Download takes approximately 20–40 minutes depending on internet speed.
-> Requires a HuggingFace account with Meta's Llama 3.1 license accepted.
+> Download takes approximately 20–40 minutes. Requires a HuggingFace account with Meta's Llama 3.1 license accepted.
 
-**What gets downloaded:**
+---
+
+## RAG Corpus Ingestion
+
+The ChromaDB vector store is populated by running the ingestion pipeline. This is required once on every new server after placing corpus files in `data/corpus/`.
+
+### Corpus Structure
+
+Place your source files in the following directories before running ingestion:
 
 ```
-models/llama/
-├── config.json
-├── generation_config.json
-├── tokenizer.json
-├── tokenizer_config.json
-├── special_tokens_map.json
-├── model-00001-of-00004.safetensors   ← model weights split across 4 shards (~15 GB total)
-├── model-00002-of-00004.safetensors
-├── model-00003-of-00004.safetensors
-├── model-00004-of-00004.safetensors
-└── model.safetensors.index.json
+data/corpus/
+├── public_health_recommendations/   # Lab reference PDFs, clinical guideline PDFs
+├── nutrition_guidelines/            # Research PDFs, DRI DOCX tables, WHO guidelines
+├── gym_programming/                 # ACSM/NSCA position stand PDFs, meta-analysis PDFs
+└── food_and_recipes/
+    ├── All_Diets.csv                # Recipe dataset with macros
+    ├── usda_foundation/             # Unzipped USDA Foundation Foods CSVs
+    └── usda_sr_legacy/              # Unzipped USDA SR Legacy CSVs
+```
+
+> **USDA data:** Download Foundation Foods and SR Legacy ZIP files from `fdc.nal.usda.gov/download-datasets/` and unzip into the subdirectories above.
+
+### Setting Up the RAG Environment
+
+```bash
+# First time only
+python3 -m venv ~/.venv-rag
+source ~/.venv-rag/bin/activate
+pip install chromadb sentence-transformers pymupdf pandas tiktoken tqdm python-docx
+```
+
+### Running Ingestion
+
+```bash
+# ChromaDB must be running first
+make start
+
+# Activate RAG environment and run
+source ~/.venv-rag/bin/activate
+python3 scripts/ingest.py
+```
+
+### Collections Created
+
+| Collection | Documents | Content |
+|------------|-----------|---------|
+| `public_health_recommendations` | 4,246 | Lab reference ranges, clinical guideline PDFs |
+| `nutrition_guidelines` | 881 | Research papers (PDF), DRI tables (DOCX) |
+| `gym_programming` | 416 | ACSM/NSCA position stands, meta-analyses (PDF) |
+| `food_and_recipes` | 7,806 | Recipes with macros + USDA nutrient data per 100g |
+| **Total** | **13,349** | |
+
+### Ingestion Design
+
+| Aspect | Decision |
+|--------|----------|
+| Embedding model | `sentence-transformers/all-MiniLM-L6-v2` (CPU — preserves T4 for LLM) |
+| Prose chunking | Sliding window, 400 words, ~15% overlap |
+| Reference doc chunking | Paragraph-boundary (no overlap) |
+| Recipe chunking | One chunk per recipe row |
+| USDA food chunking | One chunk per food item with key nutrients per 100g |
+| Metadata | `source`, `category`, `chunk_type`, `chunk_index` per chunk |
+
+### Verify Ingestion
+
+```bash
+python3 - << 'EOF'
+import chromadb
+client = chromadb.HttpClient(host="localhost", port=8001)
+for name in ["public_health_recommendations", "nutrition_guidelines",
+             "gym_programming", "food_and_recipes"]:
+    col = client.get_collection(name)
+    print(f"{name}: {col.count()} documents")
+EOF
 ```
 
 ---
@@ -368,29 +392,16 @@ models/llama/
 make start
 ```
 
-This runs `docker compose up -d --build` and starts:
-- vLLM container (builds from `services/llm/Dockerfile`)
-- ChromaDB container (pulls from Docker Hub)
-
-**First start takes longer** (~5–10 min) as Docker pulls and builds images. Subsequent starts are fast.
-
 ### Watch startup logs
 
 ```bash
 make logs
 ```
 
-Wait for this line — it means vLLM is ready:
+Wait for:
 ```
 INFO:     Application startup complete.
 ```
-
-You will also see informational messages like:
-```
-INFO: T4 does not support FlashAttention2, using FlashInfer backend
-INFO: Available KV cache: X GiB
-```
-These are expected and not errors.
 
 ### Stop all services
 
@@ -398,17 +409,11 @@ These are expected and not errors.
 make stop
 ```
 
-### Restart
-
-```bash
-make stop && make start
-```
-
 ---
 
 ## Testing & Verification
 
-### Quick test — send a prompt to the LLM
+### Quick LLM test
 
 ```bash
 make test-llm
@@ -426,10 +431,10 @@ curl -s http://localhost:8000/v1/chat/completions \
   }' | python3 -m json.tool
 ```
 
-### Check available models
+### Check ChromaDB
 
 ```bash
-curl -s http://localhost:8000/v1/models | python3 -m json.tool
+curl http://localhost:8001/api/v2/heartbeat
 ```
 
 ### Check running containers
@@ -438,14 +443,14 @@ curl -s http://localhost:8000/v1/models | python3 -m json.tool
 docker ps
 ```
 
-Expected output:
+Expected:
 ```
 CONTAINER ID   IMAGE                         PORTS                    NAMES
 xxxxxxxxxxxx   ai-health-orchestration-llm   0.0.0.0:8000->8000/tcp   ai-health-orchestration-llm-1
 xxxxxxxxxxxx   chromadb/chroma:latest        0.0.0.0:8001->8000/tcp   ai-health-orchestration-vector-db-1
 ```
 
-### Check GPU memory usage
+### Check GPU memory
 
 ```bash
 nvidia-smi
@@ -467,8 +472,6 @@ nvidia-smi
 
 ## Migrating to a New Server
 
-The entire system is designed for fast, reproducible migration.
-
 ### What lives where
 
 | Data | Location | In Git? | Migrate how? |
@@ -476,14 +479,16 @@ The entire system is designed for fast, reproducible migration.
 | Code & config | GitHub | ✅ Yes | `git clone` |
 | Docker setup | GitHub | ✅ Yes | `git clone` |
 | Training scripts & dataset | GitHub | ✅ Yes | `git clone` |
+| Ingestion pipeline | GitHub | ✅ Yes | `git clone` |
 | Llama 3.1 model | `./models/llama/` | ❌ No | `bash scripts/download_model.sh` |
 | LoRA adapter | `./models/adapters/` | ❌ No | Re-train or `scp` |
-| Vector DB data | `./data/chroma/` | ❌ No | `scp` or re-index |
+| Vector DB data | `./data/chroma/` | ❌ No | `scp` or re-run `ingest.py` |
+| Corpus files | `./data/corpus/` | ❌ No | `scp` from original machine |
 
 ### Migration steps
 
 ```bash
-# 1. On the new server — complete the Fresh Server Setup Guide above
+# 1. Complete Fresh Server Setup Guide above
 
 # 2. Clone the repo
 git clone git@github.com:gharaehs/ai-health-orchestration.git
@@ -493,13 +498,17 @@ cd ai-health-orchestration
 export HF_TOKEN="hf_your_token_here"
 bash scripts/download_model.sh
 
-# 4. Start everything
+# 4. Start services
 make start
 
-# 5. Watch logs until ready
-make logs
+# 5. Transfer corpus files (from original machine)
+scp -r ./data/corpus/ user@new-server:~/ai-health-orchestration/data/
 
-# 6. Test
+# 6. Re-run ingestion
+source ~/.venv-rag/bin/activate
+python3 scripts/ingest.py
+
+# 7. Test
 make test-llm
 ```
 
@@ -509,46 +518,40 @@ make test-llm
 
 ### vLLM crashes with CUDA Out of Memory
 
-**Symptom:**
-```
-torch.OutOfMemoryError: Tried to allocate X MiB. GPU 0 has Y MiB free
-```
-
 **Fix:** Ensure `--enforce-eager` is in `services/llm/Dockerfile`. Already applied in this repo.
 
----
+### ChromaDB returns v1 API deprecated error
+
+Expected behavior. ChromaDB 1.5.8 uses v2 API. Always use:
+```bash
+curl http://localhost:8001/api/v2/heartbeat   # ✅ correct
+curl http://localhost:8001/api/v1/heartbeat   # ❌ deprecated
+```
+The Python client (`chromadb.HttpClient`) handles this automatically.
+
+### Ingestion script warns on a PDF
+
+Some PDFs may have extraction issues. The script logs `[WARN]` and skips them — intentional. Check warning output after ingestion and manually inspect any skipped files.
 
 ### Docker: No space left on device
 
-**Symptom:**
-```
-failed to register layer: write ...: no space left on device
-```
-
-**Fix:** Free up disk space:
 ```bash
 docker system prune -af
-rm -rf /home/ubuntu/.local/lib/   # removes old system-wide pip packages if present
 df -h
 ```
 
----
-
 ### vLLM uses FlashInfer instead of FlashAttention2
 
-This is **not an error**. The T4 GPU (compute capability 7.5) does not support FlashAttention2 which requires compute capability 8.0+. vLLM automatically falls back to FlashInfer, which works correctly on T4.
-
----
+**Not an error.** T4 GPU (compute capability 7.5) does not support FlashAttention2 (requires 8.0+). vLLM automatically falls back to FlashInfer, which works correctly on T4.
 
 ### Training venv issues
 
-Always activate the training venv before running training scripts:
 ```bash
 source ~/.venv-training/bin/activate
 python training/train.py
 ```
 
-If the venv is missing, recreate it:
+If missing, recreate:
 ```bash
 python3 -m venv ~/.venv-training
 source ~/.venv-training/bin/activate
@@ -566,39 +569,27 @@ pip install "transformers==4.45.2" "peft==0.13.0" "trl==0.11.0" \
 **Completed:**
 - EC2 g4dn.xlarge provisioned with Ubuntu 22.04
 - NVIDIA drivers (535) + CUDA 12.2 installed and verified
-- Docker + Docker Compose installed
-- NVIDIA Container Toolkit configured
-- GitHub repository created with portable structure
-- vLLM serving via OpenAI-compatible API on port 8000
-- ChromaDB running on port 8001 (ready for Module 3)
-- CUDA OOM issue resolved with `--enforce-eager` flag
-- Full test passed: LLM responding to prompts
+- Docker + Docker Compose + NVIDIA Container Toolkit configured
+- vLLM serving Llama 3.1 8B via OpenAI-compatible API on port 8000
+- ChromaDB running on port 8001
+- CUDA OOM resolved with `--enforce-eager`
 
 **Key learnings:**
 - 1B parameters ≈ 2 GB VRAM in FP16
 - vLLM's PagedAttention enables efficient multi-request serving
 - T4 uses FlashInfer (not FlashAttention2) — correct and expected
-- CUDA graph warmup is the key OOM culprit on T4; `--enforce-eager` solves it
+- CUDA graph warmup is the OOM culprit on T4; `--enforce-eager` solves it
 
 ---
 
 ### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA (Complete)
 
 **Completed:**
-- Switched from Mistral 7B AWQ to `meta-llama/Meta-Llama-3.1-8B-Instruct` fp16 — single model for both training and serving
-- Built 21-example health domain training dataset covering meal plans, gym programs, grocery lists, blood test analysis, body composition, and complete multi-output plans
-- QLoRA fine-tuning pipeline: Llama 3.1 8B loaded in 4-bit via BitsAndBytes, LoRA adapters applied (rank=16, alpha=32)
+- Switched from Mistral 7B AWQ to `meta-llama/Meta-Llama-3.1-8B-Instruct` fp16
+- Built 21-example health domain training dataset
+- QLoRA fine-tuning: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA (rank=16, alpha=32)
 - LoRA adapter trained and saved to `./models/adapters/health-v1/` (~161 MB)
 - Evaluation completed: base vs fine-tuned comparison across 5 test prompts
-- JSON consistency improvement confirmed on blood test analysis output
-
-**Key learnings:**
-- AWQ quantization is inference-only — incompatible with LoRA training (cannot dequantize for gradient computation)
-- BitsAndBytes 4-bit (NF4) is the correct quantization format for QLoRA training
-- A single fp16 model can serve both training (via BitsAndBytes) and inference (via vLLM) — no separate model versions needed
-- LoRA adapters are model-specific but the training dataset is a permanent, reusable asset
-- 21 training examples is sufficient to demonstrate the technique; production fine-tuning benefits from hundreds of examples
-- Llama 3.1's 128K context window (vs Mistral's 4K) is critical for Module 4 RAG use cases
 
 **Training dataset categories:**
 
@@ -611,23 +602,62 @@ pip install "transformers==4.45.2" "peft==0.13.0" "trl==0.11.0" \
 | Body Composition Assessment | 1 |
 | Complete Multi-Output Plans | 1 |
 
+**Key learnings:**
+- AWQ is inference-only — incompatible with LoRA training
+- BitsAndBytes 4-bit (NF4) is the correct format for QLoRA training
+- Single fp16 model serves both training and inference — no separate versions needed
+- 128K context window (vs Mistral's 4K) is critical for Module 4 RAG
+
 ---
 
-### 🔜 Module 3 — Vector Database (Next)
+### ✅ Module 3 — Vector Database & RAG Corpus Ingestion (Complete)
 
-Planned: Ingest curated nutrition and gym programming knowledge into ChromaDB, implement semantic chunking and embedding generation.
+**Completed:**
+- Curated 4-category domain corpus from authoritative sources
+- Built `scripts/ingest.py`: full pipeline from raw files → text extraction → chunking → embedding → ChromaDB storage
+- Handles PDF (PyMuPDF), DOCX (python-docx), and CSV (pandas) file types
+- 4 isolated ChromaDB collections with category metadata for agent-specific retrieval
+- Embedding model: `sentence-transformers/all-MiniLM-L6-v2` on CPU
+- Retrieval smoke-tested across all 4 collections — semantically relevant results confirmed
+- Total: **13,349 documents** ingested
+
+**Corpus sources by category:**
+
+| Category | Key Sources |
+|----------|-------------|
+| Public health recommendations | ABIM lab reference ranges, NBME lab values, ACSM/AHA cholesterol guidelines, ESC cardiovascular prevention, ADA diabetes standards, Endocrine Society testosterone guidelines |
+| Nutrition guidelines | JISSN protein & nutrient timing position stands, WHO carbohydrate/fat guidelines, DRI tables (RDA/AI/UL for vitamins, minerals, macronutrients), Mediterranean diet meta-analyses, high-protein diet research |
+| Gym programming | ACSM 2026 resistance training position stand, ACSM 2009 progression models, IUSCA hypertrophy position stand, NSCA basics manual, periodization meta-analyses, training frequency reviews |
+| Food & recipes | All_Diets.csv (diet-categorized recipes with macros), USDA Foundation Foods (Dec 2025), USDA SR Legacy (2018) |
+
+**ChromaDB Collections:**
+
+| Collection | Documents |
+|------------|-----------|
+| `public_health_recommendations` | 4,246 |
+| `nutrition_guidelines` | 881 |
+| `gym_programming` | 416 |
+| `food_and_recipes` | 7,806 |
+| **Total** | **13,349** |
+
+**Key learnings:**
+- Chunking strategy must vary by document type — sliding window for prose, paragraph-boundary for reference docs, atomic chunks for recipes
+- 15% overlap prevents context loss at chunk boundaries in prose — unnecessary for atomic chunks
+- Four isolated collections give agents precise retrieval scope without metadata filtering complexity
+- ChromaDB 1.5.8 uses v2 API — `api/v1` endpoint is deprecated
+- Embedding on CPU with `all-MiniLM-L6-v2` is correct — preserves T4 VRAM entirely for LLM inference
 
 ---
 
-### 🔜 Module 4 — Retrieval-Augmented Generation (Planned)
+### 🔜 Module 4 — Retrieval-Augmented Generation (Next)
 
-Planned: Connect ChromaDB retrieval to the LLM pipeline, grounding health plan generation in retrieved domain knowledge.
+Planned: Wire ChromaDB retrieval into the Llama 3.1 inference pipeline. Build a RAG query layer that embeds user health profiles, retrieves relevant context from the appropriate collection, augments the LLM prompt, and generates grounded structured JSON health plans.
 
 ---
 
 ### 🔜 Module 5 — Agentic AI / Multi-Agent Orchestration (Planned)
 
-Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent — coordinating via structured intermediate outputs.
+Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent — each querying its designated ChromaDB collection and coordinating via structured intermediate outputs.
 
 ---
 
@@ -639,26 +669,24 @@ Planned: Expose health data, workout history, and recipe database via MCP server
 
 ## Design Decisions
 
-### Why Llama 3.1 8B Instruct over Mistral 7B?
+### Why Llama 3.1 8B over Mistral 7B?
 
 | Factor | Llama 3.1 8B | Mistral 7B AWQ |
 |--------|-------------|----------------|
 | Context window | 128K tokens | 4K tokens |
-| RAG suitability (Module 4) | ✅ Excellent | ❌ Too short for retrieved docs |
-| LoRA training compatible | ✅ fp16 + BitsAndBytes | ❌ AWQ is inference-only |
-| Single model for train + serve | ✅ Yes | ❌ Requires separate versions |
-| JSON structured output | Excellent | Good |
-| Community support | Massive | Good |
+| RAG suitability | ✅ Excellent | ❌ Too short for retrieved docs |
+| LoRA training | ✅ fp16 + BitsAndBytes | ❌ AWQ is inference-only |
+| Single model train + serve | ✅ Yes | ❌ Requires separate versions |
 
 The 128K context window was the decisive factor — essential for Module 4 RAG where retrieved documents, user health profiles, and conversation history must fit in a single context.
 
-### Why fp16 instead of AWQ for serving?
+### Why four separate ChromaDB collections?
 
-AWQ is inference-optimized and would be slightly more VRAM-efficient. However, using the same fp16 model for both training and serving eliminates the need to maintain two separate model versions and simplifies the entire pipeline. vLLM handles fp16 efficiently with `--dtype float16` on the T4.
+Each agent in the multi-agent architecture (Module 5) queries only the domain relevant to its task. A Lab Analysis Agent should never retrieve a recipe when looking up an LDL threshold. Collection-level isolation enforces this separation cleanly without complex metadata filtering logic in every query.
 
-### Why a single model for training and serving?
+### Why CPU for embeddings?
 
-One fp16 download serves both purposes: BitsAndBytes loads it in 4-bit for training (freeing VRAM for gradients), and vLLM loads it in float16 for serving. The LoRA adapter produced during training can be loaded on top at inference time. This is cleaner, cheaper to maintain, and simpler to upgrade when a better model is released.
+The ingestion pipeline and runtime retrieval both use `all-MiniLM-L6-v2` on CPU. This preserves the T4's full 16 GB VRAM for Llama 3.1 inference. The embedding model is fast enough on CPU for the query volumes this system handles.
 
 ### Why vLLM over llama.cpp?
 
@@ -667,16 +695,15 @@ One fp16 download serves both purposes: BitsAndBytes loads it in 4-bit for train
 | T4 GPU utilization | Excellent | Good but suboptimal |
 | Throughput | High (PagedAttention) | Lower |
 | OpenAI-compatible API | Built-in | Requires wrapper |
-| Docker support | First-class | More setup |
 | Best use case | GPU server | CPU / laptop |
-
-### Why models outside the Docker image?
-
-Baking the 15 GB model into the Docker image would make it extremely large, slow to build, and impossible to push. Mounting it as a volume keeps the image lightweight and the model reusable across container rebuilds.
 
 ### Why ChromaDB over FAISS?
 
-ChromaDB offers a persistent server with a REST API, making it accessible across all services in the compose stack. FAISS is a library (not a server) better suited for embedding into application code directly. ChromaDB is the right choice for the multi-service architecture here.
+ChromaDB runs as a persistent server with a REST API, accessible from any container in the compose stack. FAISS is a library embedded in application code — unsuitable for a multi-service Docker architecture where multiple agents need independent access to vector storage.
+
+### Why models and corpus outside the Docker image?
+
+Baking 15 GB model weights or multi-GB corpus files into a Docker image makes it enormous, slow to build, and impossible to push to a registry. Mounting as volumes keeps images lightweight and assets reusable across container rebuilds.
 
 ---
 
@@ -690,4 +717,4 @@ ChromaDB offers a persistent server with a REST API, making it accessible across
 
 ---
 
-*Last updated: Modules 1 & 2 complete — March 2026*
+*Last updated: Modules 1, 2 & 3 complete — April 2026*
