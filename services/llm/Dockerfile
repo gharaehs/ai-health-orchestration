@@ -9,7 +9,7 @@ ENV MODEL_PATH=/models/llama
 CMD ["--model", "/models/llama", \
      "--quantization", "bitsandbytes", \
      "--load-format", "bitsandbytes", \
-     "--max-model-len", "8192", \
+     "--max-model-len", "16384", \
      "--gpu-memory-utilization", "0.85", \
      "--max-num-seqs", "8", \
      "--enforce-eager", \

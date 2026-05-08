@@ -36,8 +36,8 @@ This system implements a multi-module AI pipeline across 6 engineering modules:
 | Module 1 | Local LLM Deployment & Quantization | ✅ Complete |
 | Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | ✅ Complete |
 | Module 3 | Vector Database & RAG Corpus Ingestion | ✅ Complete |
-| Module 4 | Retrieval-Augmented Generation (RAG) | 🔜 Next |
-| Module 5 | Agentic AI / Multi-Agent Orchestration | 🔜 Planned |
+| Module 4 | Retrieval-Augmented Generation (RAG) | ✅ Complete |
+| Module 5 | Agentic AI / Multi-Agent Orchestration | 🔜 Next |
 | Module 6 | Model Context Protocol (MCP) | 🔜 Planned |
 
 **Core capabilities:**
@@ -69,28 +69,33 @@ This system implements a multi-module AI pipeline across 6 engineering modules:
 │             ▼                └──────────────────────────────┘   │
 │    ./models/llama/       (mounted volume, not in git)           │
 │    ./models/adapters/    (LoRA adapters, not in git)            │
-│    ./data/chroma/        (mounted volume, not in git)           │
+│    ./data/chroma/        (mounted volume, persisted to disk)    │
 │    ./data/corpus/        (corpus files, not in git)             │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Data flow:**
+**Data flow (Module 4 RAG pipeline):**
 
 ```
-User Query
+User Query (health profile + goal)
     │
     ▼
-vLLM API (port 8000)          ← OpenAI-compatible REST API
+HealthRAGPipeline (rag/pipeline.py)
     │
-    ├── Module 3+: Query ChromaDB (port 8001) for relevant context
-    │       ├── public_health_recommendations  ← Lab markers, clinical thresholds
-    │       ├── nutrition_guidelines           ← Macros, DRIs, dietary patterns
-    │       ├── gym_programming                ← Rep ranges, periodization
-    │       └── food_and_recipes               ← Recipes + USDA nutrient data
-    │             └── RAG: Augment prompt with retrieved documents
+    ├── 1. Embed query → sentence-transformers/all-MiniLM-L6-v2 (CPU)
     │
-    └── Generate structured JSON response
+    ├── 2. Retrieve → ChromaDB (port 8001)
+    │       ├── nutrition_guidelines      ← Macros, DRIs, dietary patterns
+    │       ├── food_and_recipes          ← Recipes + USDA nutrient data
+    │       ├── gym_programming           ← Rep ranges, periodization
+    │       └── public_health_recs        ← Lab markers, clinical thresholds
+    │
+    ├── 3. Build augmented prompt → HealthPromptBuilder (STRUCTURED strategy)
+    │       └── [CONTEXT: <collection label>] + retrieved chunks + user request
+    │
+    └── 4. Generate → vLLM API (port 8000)
+            └── Structured JSON response (meal plan / gym program / lab analysis)
 ```
 
 ---
@@ -103,7 +108,7 @@ vLLM API (port 8000)          ← OpenAI-compatible REST API
 | **GPU** | NVIDIA Tesla T4 — 16 GB VRAM |
 | **CPU** | 4 vCPUs |
 | **RAM** | 16 GB |
-| **Storage** | 48 GB SSD (NVMe) |
+| **Storage** | 80 GB SSD (NVMe) |
 | **OS** | Ubuntu 22.04 LTS |
 | **CUDA** | 12.2 |
 | **Driver** | 535.288.01 |
@@ -136,7 +141,15 @@ ai-health-orchestration/
 │
 ├── scripts/
 │   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
-│   └── ingest.py                   # Module 3: RAG corpus ingestion pipeline
+│   ├── ingest.py                   # Module 3: RAG corpus ingestion pipeline
+│   └── test_rag.py                 # Module 4: RAG pipeline CLI test tool
+│
+├── rag/                            # Module 4: RAG pipeline
+│   ├── __init__.py
+│   ├── retriever.py                # ChromaDB query logic + collection routing
+│   ├── prompt_builder.py           # Prompt assembly (STRUCTURED / NAIVE strategies)
+│   ├── pipeline.py                 # Main RAG orchestration class
+│   └── evaluate.py                 # RAG vs no-RAG evaluation suite
 │
 ├── training/
 │   ├── train.py                    # QLoRA fine-tuning script
@@ -155,14 +168,11 @@ ai-health-orchestration/
 └── data/
     ├── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
     └── corpus/                     # ⚠️ NOT IN GIT — raw corpus files for ingestion
-        ├── public_health_recommendations/   # Lab reference ranges, clinical guidelines
-        ├── nutrition_guidelines/            # DRI tables, JISSN position stands, WHO guidelines
-        ├── gym_programming/                 # ACSM/NSCA position stands, meta-analyses
-        └── food_and_recipes/               # All_Diets.csv + USDA FoodData Central CSVs
+        ├── public_health_recommendations/
+        ├── nutrition_guidelines/
+        ├── gym_programming/
+        └── food_and_recipes/
 ```
-
-> **Why are corpus files not in git?**
-> Corpus files include large PDFs and multi-GB USDA CSV datasets. They are excluded intentionally. Run `scripts/ingest.py` after placing corpus files in `data/corpus/` to re-populate ChromaDB on a new server.
 
 ---
 
@@ -171,28 +181,36 @@ ai-health-orchestration/
 ### LLM Service — vLLM + Llama 3.1 8B Instruct
 
 - **Image:** `vllm/vllm-openai:latest`
-- **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, loaded with on-the-fly float16 quantization)
+- **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, loaded with on-the-fly 4-bit quantization via BitsAndBytes)
 - **Port:** `8000`
 - **API:** OpenAI-compatible (`/v1/chat/completions`, `/v1/models`, etc.)
-- **Inference flags:**
+- **Runtime flags** (set via `docker-compose.yml` command override):
   - `--dtype float16` — serves fp16 model efficiently on T4
-  - `--max-model-len 8192` — context window (Llama 3.1 supports up to 128K)
+  - `--max-model-len 16384` — 16K context window (increased from 8K for RAG use)
   - `--gpu-memory-utilization 0.85` — reserves 15% VRAM as safety buffer
   - `--max-num-seqs 8` — limits concurrent sequences
   - `--enforce-eager` — disables CUDA graph capture (required for T4, prevents OOM)
-  - `--quantization bitsandbytes` + `--load-format bitsandbytes` — loads fp16 weights and quantizes to 4-bit on the fly
+  - `--quantization bitsandbytes` + `--load-format bitsandbytes` — on-the-fly 4-bit quantization
+
+> **Why `--max-model-len 16384`?**
+> The RAG pipeline injects up to 12,000 chars (~3,000 tokens) of retrieved context into each prompt. Combined with the health profile, output schema, and 2,048 token generation budget, the original 8,192 limit was too tight. 16,384 provides comfortable headroom without exceeding T4 KV cache capacity.
 
 > **Why `--enforce-eager`?**
-> The T4 GPU (CUDA compute capability 7.5) struggles with vLLM's default CUDA graph warmup which tries to capture 512 graph sizes simultaneously, causing an OOM crash. `--enforce-eager` disables this. Slightly slower for high-throughput scenarios but works perfectly for development and single-user inference.
+> The T4 GPU (CUDA compute capability 7.5) does not support vLLM's default CUDA graph warmup (512 simultaneous graph captures), which causes OOM. `--enforce-eager` disables this. Slightly slower for high-throughput scenarios but correct for single-user inference.
+
+> **Why runtime flags in `docker-compose.yml` instead of the Dockerfile?**
+> The vLLM image (~15 GB) cannot be rebuilt on the T4 instance without exhausting the 80 GB disk (Docker's build cache requires temporary space equal to the image size). The `command` override in `docker-compose.yml` bypasses the Dockerfile `CMD` at runtime — no rebuild needed.
 
 ### Vector Database — ChromaDB
 
 - **Image:** `chromadb/chroma:latest`
 - **Version:** 1.5.8 (v2 API)
 - **Port:** `8001`
-- **Storage:** `./data/chroma/` (persisted on disk)
-- **Collections:** 4 domain-specific collections (see RAG Corpus below)
-- **Used in:** Module 3+ for semantic retrieval / RAG
+- **Storage:** `./data/chroma/` mounted to `/data` inside the container
+- **Collections:** 4 domain-specific collections (13,349 documents total)
+- **Used in:** Modules 3, 4, and 5+
+
+> **Critical volume mount:** ChromaDB writes its data to `/data` inside the container. The correct bind mount is `./data/chroma:/data`. Using `/chroma/chroma` as the destination causes data to be written to an ephemeral container layer and lost on restart.
 
 ---
 
@@ -309,11 +327,9 @@ This script will:
 
 ## RAG Corpus Ingestion
 
-The ChromaDB vector store is populated by running the ingestion pipeline. This is required once on every new server after placing corpus files in `data/corpus/`.
+The ChromaDB vector store is populated by running the ingestion pipeline. Required once on every new server after placing corpus files in `data/corpus/`.
 
 ### Corpus Structure
-
-Place your source files in the following directories before running ingestion:
 
 ```
 data/corpus/
@@ -331,7 +347,6 @@ data/corpus/
 ### Setting Up the RAG Environment
 
 ```bash
-# First time only
 python3 -m venv ~/.venv-rag
 source ~/.venv-rag/bin/activate
 pip install chromadb sentence-transformers pymupdf pandas tiktoken tqdm python-docx
@@ -340,10 +355,7 @@ pip install chromadb sentence-transformers pymupdf pandas tiktoken tqdm python-d
 ### Running Ingestion
 
 ```bash
-# ChromaDB must be running first
-make start
-
-# Activate RAG environment and run
+make start   # ChromaDB must be running first
 source ~/.venv-rag/bin/activate
 python3 scripts/ingest.py
 ```
@@ -357,17 +369,6 @@ python3 scripts/ingest.py
 | `gym_programming` | 416 | ACSM/NSCA position stands, meta-analyses (PDF) |
 | `food_and_recipes` | 7,806 | Recipes with macros + USDA nutrient data per 100g |
 | **Total** | **13,349** | |
-
-### Ingestion Design
-
-| Aspect | Decision |
-|--------|----------|
-| Embedding model | `sentence-transformers/all-MiniLM-L6-v2` (CPU — preserves T4 for LLM) |
-| Prose chunking | Sliding window, 400 words, ~15% overlap |
-| Reference doc chunking | Paragraph-boundary (no overlap) |
-| Recipe chunking | One chunk per recipe row |
-| USDA food chunking | One chunk per food item with key nutrients per 100g |
-| Metadata | `source`, `category`, `chunk_type`, `chunk_index` per chunk |
 
 ### Verify Ingestion
 
@@ -386,37 +387,41 @@ EOF
 
 ## Running the System
 
-### Start all services
-
 ```bash
-make start
-```
-
-### Watch startup logs
-
-```bash
-make logs
-```
-
-Wait for:
-```
-INFO:     Application startup complete.
-```
-
-### Stop all services
-
-```bash
-make stop
+make start    # Start all services
+make logs     # Watch startup logs — wait for: INFO: Application startup complete.
+make stop     # Stop all services
 ```
 
 ---
 
 ## Testing & Verification
 
-### Quick LLM test
+### LLM test
 
 ```bash
 make test-llm
+```
+
+### RAG pipeline tests (Module 4)
+
+```bash
+source ~/.venv-rag/bin/activate
+
+# Verify all ChromaDB collections are reachable
+python scripts/test_rag.py --health-check
+
+# Single RAG query (meal plan, gym program, grocery list, lab analysis)
+python scripts/test_rag.py --type meal_plan
+python scripts/test_rag.py --type gym_program
+python scripts/test_rag.py --type lab_analysis
+
+# RAG vs no-RAG side-by-side comparison
+python scripts/test_rag.py --type meal_plan --compare
+python scripts/test_rag.py --type lab_analysis --compare
+
+# Full evaluation suite (4 test cases × 2 modes → rag/evaluation_results.json)
+python scripts/test_rag.py --evaluate
 ```
 
 ### Manual curl test
@@ -435,19 +440,6 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 ```bash
 curl http://localhost:8001/api/v2/heartbeat
-```
-
-### Check running containers
-
-```bash
-docker ps
-```
-
-Expected:
-```
-CONTAINER ID   IMAGE                         PORTS                    NAMES
-xxxxxxxxxxxx   ai-health-orchestration-llm   0.0.0.0:8000->8000/tcp   ai-health-orchestration-llm-1
-xxxxxxxxxxxx   chromadb/chroma:latest        0.0.0.0:8001->8000/tcp   ai-health-orchestration-vector-db-1
 ```
 
 ### Check GPU memory
@@ -478,8 +470,8 @@ nvidia-smi
 |------|----------|---------|--------------|
 | Code & config | GitHub | ✅ Yes | `git clone` |
 | Docker setup | GitHub | ✅ Yes | `git clone` |
+| RAG pipeline | GitHub | ✅ Yes | `git clone` |
 | Training scripts & dataset | GitHub | ✅ Yes | `git clone` |
-| Ingestion pipeline | GitHub | ✅ Yes | `git clone` |
 | Llama 3.1 model | `./models/llama/` | ❌ No | `bash scripts/download_model.sh` |
 | LoRA adapter | `./models/adapters/` | ❌ No | Re-train or `scp` |
 | Vector DB data | `./data/chroma/` | ❌ No | `scp` or re-run `ingest.py` |
@@ -510,6 +502,7 @@ python3 scripts/ingest.py
 
 # 7. Test
 make test-llm
+python scripts/test_rag.py --health-check
 ```
 
 ---
@@ -518,7 +511,18 @@ make test-llm
 
 ### vLLM crashes with CUDA Out of Memory
 
-**Fix:** Ensure `--enforce-eager` is in `services/llm/Dockerfile`. Already applied in this repo.
+**Fix:** Ensure `--enforce-eager` is present in the `docker-compose.yml` command section. Already applied in this repo.
+
+### ChromaDB collections empty after restart
+
+**Cause:** Incorrect volume mount destination. ChromaDB writes to `/data` inside the container, not `/chroma/chroma`.
+
+**Fix:** Ensure `docker-compose.yml` has:
+```yaml
+volumes:
+  - ./data/chroma:/data
+```
+Re-run `python3 scripts/ingest.py` after fixing the mount.
 
 ### ChromaDB returns v1 API deprecated error
 
@@ -529,16 +533,21 @@ curl http://localhost:8001/api/v1/heartbeat   # ❌ deprecated
 ```
 The Python client (`chromadb.HttpClient`) handles this automatically.
 
-### Ingestion script warns on a PDF
+### RAG query times out
 
-Some PDFs may have extraction issues. The script logs `[WARN]` and skips them — intentional. Check warning output after ingestion and manually inspect any skipped files.
+**Cause:** vLLM generating 2,048 tokens on a T4 takes ~3–4 minutes. The default requests timeout of 120s is too short.
 
-### Docker: No space left on device
-
+**Fix:** Already set to 600s in `rag/pipeline.py`. If you see timeout errors, verify:
 ```bash
-docker system prune -af
-df -h
+grep "timeout=" ~/ai-health-orchestration/rag/pipeline.py
+# Should show: timeout=600
 ```
+
+### Docker build fails with "no space left on device"
+
+**Cause:** The vLLM image (~15 GB) requires temporary build cache space. At 80 GB total with model + corpus + existing image, there is insufficient free space for a rebuild.
+
+**Fix:** Do not rebuild the vLLM image. All runtime configuration is managed via the `command` override in `docker-compose.yml`. Simply edit that file and run `make stop && docker compose up -d`.
 
 ### vLLM uses FlashInfer instead of FlashAttention2
 
@@ -618,7 +627,6 @@ pip install "transformers==4.45.2" "peft==0.13.0" "trl==0.11.0" \
 - Handles PDF (PyMuPDF), DOCX (python-docx), and CSV (pandas) file types
 - 4 isolated ChromaDB collections with category metadata for agent-specific retrieval
 - Embedding model: `sentence-transformers/all-MiniLM-L6-v2` on CPU
-- Retrieval smoke-tested across all 4 collections — semantically relevant results confirmed
 - Total: **13,349 documents** ingested
 
 **Corpus sources by category:**
@@ -626,38 +634,57 @@ pip install "transformers==4.45.2" "peft==0.13.0" "trl==0.11.0" \
 | Category | Key Sources |
 |----------|-------------|
 | Public health recommendations | ABIM lab reference ranges, NBME lab values, ACSM/AHA cholesterol guidelines, ESC cardiovascular prevention, ADA diabetes standards, Endocrine Society testosterone guidelines |
-| Nutrition guidelines | JISSN protein & nutrient timing position stands, WHO carbohydrate/fat guidelines, DRI tables (RDA/AI/UL for vitamins, minerals, macronutrients), Mediterranean diet meta-analyses, high-protein diet research |
-| Gym programming | ACSM 2026 resistance training position stand, ACSM 2009 progression models, IUSCA hypertrophy position stand, NSCA basics manual, periodization meta-analyses, training frequency reviews |
+| Nutrition guidelines | JISSN protein & nutrient timing position stands, WHO carbohydrate/fat guidelines, DRI tables (RDA/AI/UL for vitamins, minerals, macronutrients), Mediterranean diet meta-analyses |
+| Gym programming | ACSM 2026 resistance training position stand, ACSM 2009 progression models, IUSCA hypertrophy position stand, NSCA basics manual, periodization meta-analyses |
 | Food & recipes | All_Diets.csv (diet-categorized recipes with macros), USDA Foundation Foods (Dec 2025), USDA SR Legacy (2018) |
-
-**ChromaDB Collections:**
-
-| Collection | Documents |
-|------------|-----------|
-| `public_health_recommendations` | 4,246 |
-| `nutrition_guidelines` | 881 |
-| `gym_programming` | 416 |
-| `food_and_recipes` | 7,806 |
-| **Total** | **13,349** |
 
 **Key learnings:**
 - Chunking strategy must vary by document type — sliding window for prose, paragraph-boundary for reference docs, atomic chunks for recipes
-- 15% overlap prevents context loss at chunk boundaries in prose — unnecessary for atomic chunks
 - Four isolated collections give agents precise retrieval scope without metadata filtering complexity
 - ChromaDB 1.5.8 uses v2 API — `api/v1` endpoint is deprecated
-- Embedding on CPU with `all-MiniLM-L6-v2` is correct — preserves T4 VRAM entirely for LLM inference
+- ChromaDB must be mounted to `/data` inside the container — not `/chroma/chroma`
 
 ---
 
-### 🔜 Module 4 — Retrieval-Augmented Generation (Next)
+### ✅ Module 4 — Retrieval-Augmented Generation (Complete)
 
-Planned: Wire ChromaDB retrieval into the Llama 3.1 inference pipeline. Build a RAG query layer that embeds user health profiles, retrieves relevant context from the appropriate collection, augments the LLM prompt, and generates grounded structured JSON health plans.
+**Completed:**
+- Built `rag/` module: retriever, prompt builder, pipeline, and evaluation
+- `rag/retriever.py`: ChromaDB query logic with collection routing per output type
+- `rag/prompt_builder.py`: two prompt strategies — STRUCTURED (labelled context blocks) and NAIVE (flat concatenation baseline)
+- `rag/pipeline.py`: end-to-end orchestration — embed → retrieve → build prompt → call vLLM → parse JSON
+- `rag/evaluate.py`: RAG vs. no-RAG evaluation suite across 4 test cases
+- `scripts/test_rag.py`: CLI test tool with `--health-check`, `--compare`, `--evaluate` modes
+- Context window raised from 8,192 to 16,384 tokens via `docker-compose.yml` command override
+- ChromaDB volume mount fixed: `./data/chroma:/data` (was incorrectly `/chroma/chroma`)
+- Full end-to-end test passed: retrieval → augmented prompt → structured JSON generation
+
+**RAG pipeline metrics (lab analysis comparison):**
+
+| Metric | With RAG | No RAG |
+|--------|----------|--------|
+| Latency | 58.8s | 37.1s |
+| Prompt tokens (est.) | 2,289 | 417 |
+| Chunks retrieved | 6 | 0 |
+| JSON parse | ✅ | ✅ |
+
+**Key RAG vs. no-RAG finding — LDL reference range:**
+- **RAG:** `"Optimal: < 2.6 mmol/L, Near-optimal: 2.6–3.3, Borderline-high: 3.3–4.1, High: > 4.1"` ← from ingested ABIM/NBME clinical guidelines
+- **No-RAG:** `"2.5–3.5 mmol/L"` ← model estimate from training data
+
+The RAG system correctly applied 4-tier clinical classification directly from the ingested corpus. The no-RAG system produced a simplified, less accurate flat range — a medically meaningful difference.
+
+**Key learnings:**
+- Retrieval is fast (~0.3s for 10 chunks across 2 collections) — the latency overhead is entirely generation time
+- STRUCTURED prompt strategy (labelled context blocks per collection) produces better grounding than naive concatenation
+- `max_context_chars=12,000` fits comfortably within the 16,384 token window alongside the health profile, schema, and 2,048-token output budget
+- ChromaDB volume mount to the wrong container path causes silent data loss on restart — always verify with `ls data/chroma/` after first ingestion
 
 ---
 
-### 🔜 Module 5 — Agentic AI / Multi-Agent Orchestration (Planned)
+### 🔜 Module 5 — Agentic AI / Multi-Agent Orchestration (Next)
 
-Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent — each querying its designated ChromaDB collection and coordinating via structured intermediate outputs.
+Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent — each with dedicated ChromaDB collection scope, coordinating via structured intermediate outputs through an orchestration loop.
 
 ---
 
@@ -680,13 +707,17 @@ Planned: Expose health data, workout history, and recipe database via MCP server
 
 The 128K context window was the decisive factor — essential for Module 4 RAG where retrieved documents, user health profiles, and conversation history must fit in a single context.
 
+### Why STRUCTURED over NAIVE prompt strategy?
+
+The STRUCTURED strategy groups retrieved chunks by collection and labels each section (e.g. `[CONTEXT: Clinical Lab Reference Ranges & Health Guidelines]`). This tells the model exactly what each block of text represents and strongly encourages it to use and cite the retrieved data. The NAIVE strategy (flat concatenation) produces lower-quality grounding because the model cannot distinguish the source or authority of each chunk.
+
 ### Why four separate ChromaDB collections?
 
 Each agent in the multi-agent architecture (Module 5) queries only the domain relevant to its task. A Lab Analysis Agent should never retrieve a recipe when looking up an LDL threshold. Collection-level isolation enforces this separation cleanly without complex metadata filtering logic in every query.
 
 ### Why CPU for embeddings?
 
-The ingestion pipeline and runtime retrieval both use `all-MiniLM-L6-v2` on CPU. This preserves the T4's full 16 GB VRAM for Llama 3.1 inference. The embedding model is fast enough on CPU for the query volumes this system handles.
+The ingestion pipeline and runtime retrieval both use `all-MiniLM-L6-v2` on CPU. This preserves the T4's full 16 GB VRAM for Llama 3.1 inference. The embedding model is fast enough on CPU (~0.3s per query) for the query volumes this system handles.
 
 ### Why vLLM over llama.cpp?
 
@@ -701,9 +732,9 @@ The ingestion pipeline and runtime retrieval both use `all-MiniLM-L6-v2` on CPU.
 
 ChromaDB runs as a persistent server with a REST API, accessible from any container in the compose stack. FAISS is a library embedded in application code — unsuitable for a multi-service Docker architecture where multiple agents need independent access to vector storage.
 
-### Why models and corpus outside the Docker image?
+### Why runtime flags in docker-compose.yml instead of the Dockerfile?
 
-Baking 15 GB model weights or multi-GB corpus files into a Docker image makes it enormous, slow to build, and impossible to push to a registry. Mounting as volumes keeps images lightweight and assets reusable across container rebuilds.
+The vLLM image is ~15 GB. Rebuilding it on the T4 instance requires temporary build cache space equal to the image size, which exhausts the 80 GB disk. All vLLM configuration is therefore managed via the `command` override in `docker-compose.yml`, which takes effect at container start without a rebuild.
 
 ---
 
@@ -717,4 +748,4 @@ Baking 15 GB model weights or multi-GB corpus files into a Docker image makes it
 
 ---
 
-*Last updated: Modules 1, 2 & 3 complete — April 2026*
+*Last updated: Modules 1, 2, 3 & 4 complete — May 2026*

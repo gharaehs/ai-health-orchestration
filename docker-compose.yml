@@ -1,6 +1,17 @@
 services:
   llm:
     build: ./services/llm
+    image: ai-health-orchestration-llm
+    command: [
+      "--model", "/models/llama",
+      "--quantization", "bitsandbytes",
+      "--load-format", "bitsandbytes",
+      "--max-model-len", "16384",
+      "--gpu-memory-utilization", "0.85",
+      "--max-num-seqs", "8",
+      "--enforce-eager",
+      "--dtype", "float16"
+    ]
     ports:
       - "8000:8000"
     volumes:
@@ -13,11 +24,10 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
-
   vector-db:
     image: chromadb/chroma:latest
     ports:
       - "8001:8000"
     volumes:
-      - ./data/chroma:/chroma/chroma
+      - ./data/chroma:/data
     restart: unless-stopped
