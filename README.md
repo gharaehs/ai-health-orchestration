@@ -39,7 +39,7 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 | Module 4 | Retrieval-Augmented Generation (RAG) | ✅ Complete |
 | Module 5 | Agentic AI / Multi-Agent Orchestration | 🔜 Next |
 | Module 6 | Model Context Protocol (MCP) | 🔜 Planned |
-| Frontend | Analytics Dashboard & Chat Interface | 🔜 Planned |
+| Frontend | Analytics Dashboard & Chat Interface | 🔄 In Progress (Steps 1–2 of 10 complete) |
 
 **Core capabilities:**
 - Ingest structured health data (scale metrics, blood tests, medical history)
@@ -68,6 +68,15 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 │  └──────────┬───────────┘    │  - gym_programming            │   │
 │             │                │  - food_and_recipes           │   │
 │             ▼                └──────────────────────────────┘   │
+│  ┌──────────────────────┐                                        │
+│  │   FastAPI Container  │                                        │
+│  │   Port: 8002         │                                        │
+│  │                      │                                        │
+│  │  Parallel RAG+base   │                                        │
+│  │  comparator          │                                        │
+│  │  Metrics & grounding │                                        │
+│  └──────────────────────┘                                        │
+│                                                                  │
 │    ./models/llama/       (mounted volume, not in git)           │
 │    ./models/adapters/    (LoRA adapters, not in git)            │
 │    ./data/chroma/        (mounted volume, persisted to disk)    │
@@ -97,6 +106,18 @@ HealthRAGPipeline (rag/pipeline.py)
     │
     └── 4. Generate → vLLM API (port 8000)
             └── Structured JSON response (meal plan / gym program / lab analysis)
+```
+
+**Data flow (Frontend API middleware):**
+
+```
+POST /api/chat
+    │
+    ├── asyncio.gather()
+    │       ├── Base call → vLLM (no context)
+    │       └── ChromaDB query → embed → retrieve chunks → augmented call → vLLM
+    │
+    └── Return: base_response + rag_response + retrieval sources + metrics
 ```
 
 ---
@@ -139,32 +160,30 @@ ai-health-orchestration/
 ├── services/
 │   ├── llm/
 │   │   └── Dockerfile              # vLLM container configuration
-│   ├── api/                        # Module 7: FastAPI middleware service
+│   ├── api/                        # ✅ Frontend Step 1–2: FastAPI middleware
 │   │   ├── Dockerfile
-│   │   ├── main.py                 # FastAPI app entrypoint
+│   │   ├── main.py                 # FastAPI app + /api/health endpoint
 │   │   ├── routes/
-│   │   │   ├── chat.py             # /api/chat endpoint (RAG + base parallel calls)
-│   │   │   ├── evaluate.py         # /api/evaluate endpoint (comparison metrics)
-│   │   │   └── health.py           # /api/health endpoint (service status)
+│   │   │   └── chat.py             # POST /api/chat (parallel RAG + base calls)
 │   │   ├── core/
-│   │   │   ├── comparator.py       # Parallel RAG vs base response runner
-│   │   │   ├── metrics.py          # Latency, token count, grounding score
-│   │   │   └── config.py           # Service URLs, timeouts, model config
+│   │   │   ├── comparator.py       # asyncio.gather() RAG vs base runner
+│   │   │   ├── metrics.py          # Grounding score, token count helpers
+│   │   │   └── config.py           # Service URLs, timeouts
 │   │   └── requirements.txt
-│   └── frontend/                   # Module 7: React/Vite dashboard
+│   └── frontend/                   # 🔜 Frontend Steps 5–9: React/Vite dashboard
 │       ├── Dockerfile
 │       ├── package.json
 │       ├── vite.config.ts
 │       └── src/
 │           ├── App.tsx
 │           ├── components/
-│           │   ├── ChatPanel.tsx       # Chat input + streaming response
-│           │   ├── ComparePanel.tsx    # Base vs RAG side-by-side
-│           │   ├── SourcesPanel.tsx    # Retrieved docs with similarity scores
-│           │   ├── MetricsBar.tsx      # Per-request quality metrics
-│           │   └── StatusBar.tsx       # Live service health indicators
+│           │   ├── ChatPanel.tsx
+│           │   ├── ComparePanel.tsx
+│           │   ├── SourcesPanel.tsx
+│           │   ├── MetricsBar.tsx
+│           │   └── StatusBar.tsx
 │           └── hooks/
-│               └── useChat.ts          # SSE streaming + state management
+│               └── useChat.ts
 │
 ├── scripts/
 │   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
@@ -239,23 +258,26 @@ ai-health-orchestration/
 
 > **Critical volume mount:** ChromaDB writes its data to `/data` inside the container. The correct bind mount is `./data/chroma:/data`. Using `/chroma/chroma` as the destination causes data to be written to an ephemeral container layer and lost on restart.
 
-### API Middleware — FastAPI (Module 7)
+### API Middleware — FastAPI ✅
 
 - **Framework:** FastAPI + Uvicorn
 - **Port:** `8002`
-- **Purpose:** Sits between the frontend and existing services; intercepts all requests, runs parallel RAG and base-model calls, collects analytics, and streams structured responses back to the UI
+- **Purpose:** Sits between the frontend and existing services; runs parallel RAG and base-model calls, collects analytics, and returns structured comparison payloads
 - **Key endpoints:**
-  - `POST /api/chat` — accepts health profile + query; runs both RAG and base paths; returns streaming response + metadata
-  - `GET /api/compare` — returns last request's side-by-side comparison payload
+  - `POST /api/chat` — accepts health profile + query; runs both RAG and base paths in parallel via `asyncio.gather()`; returns both responses + retrieval sources + metrics
   - `GET /api/health` — liveness check for all downstream services (vLLM, ChromaDB)
-- **Internal Docker network:** communicates with vLLM at `http://llm:8000` and ChromaDB at `http://vector-db:8001` using Docker Compose service names (not `localhost`)
+- **Internal Docker network:** communicates with vLLM at `http://llm:8000` and ChromaDB at `http://vector-db:8000` using Docker Compose service names
 
-### Frontend Dashboard — React + Vite (Module 7)
+> **ChromaDB internal port:** The host maps port 8001 → container port 8000. Inside the Docker network, the API container reaches ChromaDB at `http://vector-db:8000`, not `:8001`.
+
+> **ChromaDB v2 UUID routing:** ChromaDB 1.5.8 requires collection UUIDs (not names) in query endpoint paths. The comparator fetches and caches the name→UUID mapping at first request via `GET /collections`.
+
+### Frontend Dashboard — React + Vite
 
 - **Framework:** React 18 + TypeScript + Vite
 - **Port:** `3000`
 - **Styling:** Tailwind CSS
-- **Purpose:** Professional single-page analytics dashboard with chat interface, RAG comparison view, retrieved source explorer, and per-request quality metrics
+- **Status:** 🔜 Planned — React scaffold not yet built
 
 ---
 
@@ -272,10 +294,10 @@ Browser (port 3000)
     │
     │  HTTP / SSE streaming
     ▼
-FastAPI Middleware (port 8002)        ← NEW: services/api/
+FastAPI Middleware (port 8002)        ← ✅ Built: services/api/
     │
     ├──────────────────────────────────────────────┐
-    │   parallel calls                             │
+    │   parallel calls (asyncio.gather)            │
     ▼                                              ▼
 vLLM API (port 8000)             ChromaDB (port 8001)
 [base call: no context]          [retrieve top-k chunks]
@@ -294,8 +316,8 @@ For each user request, the FastAPI middleware:
 2. Simultaneously queries ChromaDB for the top-k relevant chunks
 3. Builds an augmented prompt and sends to vLLM **with** context (RAG response)
 4. Measures latency and token counts for both paths
-5. Computes a grounding score (how much of the RAG answer traces to retrieved sources)
-6. Returns both responses + all metadata to the frontend as a single JSON payload (or streamed via SSE)
+5. Computes a grounding score (keyword overlap between RAG response and retrieved chunks)
+6. Returns both responses + all metadata as a single JSON payload
 
 ### Technology Stack
 
@@ -316,235 +338,119 @@ For each user request, the FastAPI middleware:
 The main interface. Split into four panels:
 
 - **Chat panel** — health profile selector, free-text query input, streamed response output. Toggle switches for RAG on/off and LoRA adapter on/off
-- **Comparison panel** — side-by-side view of base model response (no RAG) vs RAG-augmented response for the same query. Differences are highlighted
-- **Sources panel** — list of retrieved ChromaDB documents with cosine similarity scores, collection names, and excerpt previews. Each source is expandable to show full chunk text and document metadata
-- **Metrics panel** — per-request quality scores: latency (base vs RAG), token counts, number of chunks retrieved, JSON validity, a computed grounding score (what % of key claims in the RAG answer trace to retrieved text), and a personalisation score
+- **Comparison panel** — side-by-side view of base model response (no RAG) vs RAG-augmented response for the same query
+- **Sources panel** — list of retrieved ChromaDB documents with cosine similarity scores, collection names, and excerpt previews
+- **Metrics panel** — per-request quality scores: latency (base vs RAG), token counts, chunks retrieved, grounding score, RAG improvement delta
 
 #### 2. Analytics (session view)
 
-Session-level aggregates across all requests:
-
-- Average RAG vs base latency over time (line chart)
-- Distribution of similarity scores for retrieved chunks (histogram)
-- Collection breakdown: which ChromaDB collections were used and how often (bar chart)
-- JSON validity rate (base vs RAG, base vs LoRA)
-- Grounding score trend across the session
+Session-level aggregates: latency trend, similarity score distribution, collection breakdown, grounding score over time.
 
 #### 3. Knowledge Base (explorer view)
 
-Browse the ChromaDB collections:
-
-- Collection selector (nutrition_guidelines, gym_programming, etc.)
-- Free-text search that queries ChromaDB directly and returns the top results with distances
-- Document preview with chunk boundaries shown
-- Collection stats: document count, embedding dimension, last ingestion timestamp
+Browse ChromaDB collections, search directly, preview chunks with similarity scores and document metadata.
 
 #### 4. Health Profile (input view)
 
-Structured form for entering health data that is included in every query:
-
-- Scale metrics: weight, body fat %, muscle mass, height
-- Blood test results: LDL, HDL, total cholesterol, triglycerides, glucose, HbA1c, creatinine, testosterone
-- Goals: fat loss / muscle gain / maintenance / performance
-- Medical history: free text
+Structured form: scale metrics, blood test results, goals, medical history. Included in every query.
 
 #### 5. Model Config (settings view)
 
-- Model selector (base, base + LoRA adapter, future models)
-- RAG parameters: top-k, max context chars, collection routing strategy
-- Generation parameters: temperature, max tokens, system prompt override
+Model selector, RAG parameters (top-k, context chars, collection routing), generation parameters.
 
 ### API Contract
 
-All endpoints served by the FastAPI middleware on port 8002.
-
 #### `POST /api/chat`
 
-Request body:
+Request:
 ```json
 {
   "query": "Based on my blood work, what protein target should I set?",
-  "health_profile": {
-    "weight_kg": 82,
-    "body_fat_pct": 18,
-    "lbm_kg": 67,
-    "ldl_mmol": 3.1,
-    "creatinine": 0.9,
-    "goal": "muscle_gain"
-  },
-  "options": {
-    "use_rag": true,
-    "use_lora": false,
-    "top_k": 6,
-    "collection_strategy": "auto"
-  }
+  "health_profile": { "weight_kg": 82, "lbm_kg": 67, "ldl_mmol": 3.1, "goal": "muscle_gain" },
+  "query_type": "lab_analysis",
+  "top_k": 6
 }
 ```
 
-Response (JSON, or SSE stream):
+Response:
 ```json
 {
-  "request_id": "req_abc123",
-  "base_response": {
-    "content": "General protein recommendations suggest 1.6–2.2 g/kg...",
-    "latency_s": 37.1,
-    "prompt_tokens": 417,
-    "completion_tokens": 312
-  },
-  "rag_response": {
-    "content": "Based on your creatinine (0.9 mg/dL) and LBM of 67 kg...",
-    "latency_s": 58.8,
-    "prompt_tokens": 2289,
-    "completion_tokens": 535,
-    "json_valid": true
-  },
+  "base_response":  { "content": "...", "latency_s": 14.6, "prompt_tokens": 74,  "completion_tokens": 247 },
+  "rag_response":   { "content": "...", "latency_s": 26.4, "prompt_tokens": 737, "completion_tokens": 392 },
   "retrieval": {
-    "chunks_retrieved": 6,
-    "collections_queried": ["nutrition_guidelines", "public_health_recommendations"],
+    "chunks_retrieved": 8,
+    "collections_queried": ["nutrition_guidelines", "food_and_recipes"],
     "retrieval_latency_s": 0.31,
     "sources": [
-      {
-        "score": 0.94,
-        "collection": "nutrition_guidelines",
-        "document_id": "issn_protein_2017_chunk_14",
-        "excerpt": "1.4–2.0 g/kg is optimal for muscle protein synthesis...",
-        "metadata": { "source": "ISSN Position Stand 2017", "page": 4 }
-      }
+      { "score": 0.68, "collection": "nutrition_guidelines",
+        "excerpt": "1.4 to 1.8 g·kg⁻¹·d⁻¹ for strength-trained athletes...",
+        "metadata": { "source": "JISSN Position Stand on Protein and Exercise.pdf" } }
     ]
   },
-  "metrics": {
-    "grounding_score": 0.91,
-    "personalisation_score": 0.87,
-    "base_score": 0.62,
-    "rag_improvement": 0.29
-  }
+  "metrics": { "grounding_score": 0.71, "base_score": 0.0, "rag_improvement": 0.71, "latency_delta_s": 11.8 }
 }
 ```
 
 #### `GET /api/health`
 
-Returns status of all downstream services:
 ```json
 {
-  "vllm": { "status": "ok", "model": "meta-llama/Meta-Llama-3.1-8B-Instruct" },
-  "chromadb": { "status": "ok", "collections": 4, "total_docs": 13349 },
-  "lora_adapter": { "status": "loaded", "adapter": "health-v1" }
+  "status": "ok",
+  "services": {
+    "vllm":    { "status": "ok", "model": "/models/llama" },
+    "chromadb": { "status": "ok", "collections": 4 }
+  }
 }
 ```
 
-#### `GET /api/collections`
-
-Returns ChromaDB collection metadata for the Knowledge Base view.
-
-#### `POST /api/search`
-
-Direct ChromaDB search for the Knowledge Base explorer, bypasses LLM generation.
-
 ### Docker Compose Integration
 
-The two new services are added to the existing `docker-compose.yml`:
-
 ```yaml
-services:
-  # --- existing ---
-  llm:
-    # unchanged
-  vector-db:
-    # unchanged
-
-  # --- new ---
   api:
     build: ./services/api
     ports:
       - "8002:8002"
     environment:
       - VLLM_URL=http://llm:8000
-      - CHROMA_URL=http://vector-db:8001
+      - CHROMA_URL=http://vector-db:8000
     depends_on:
       - llm
       - vector-db
-    volumes:
-      - ./models/adapters:/models/adapters:ro
-      - ./rag:/app/rag:ro
 
   frontend:
     build: ./services/frontend
     ports:
       - "3000:3000"
-    environment:
-      - VITE_API_URL=http://localhost:8002
     depends_on:
       - api
 ```
 
 ### Network & Security
 
-All AI services (ports 8000, 8001, 8002) are bound only to the internal Docker network — they are **not exposed to the public internet**. Only port 3000 (frontend) and port 8002 (API) are mapped to `0.0.0.0` on the EC2 host.
+All AI services (8000, 8001, 8002) are internal to the Docker network. On AWS, restrict EC2 Security Group inbound rules:
 
-On AWS, use EC2 Security Group rules to restrict access:
-
-| Port | Protocol | Source | Purpose |
-|------|----------|--------|---------|
-| 22 | TCP | Your IP only | SSH |
-| 3000 | TCP | Your IP only | Frontend dashboard |
-| 8002 | TCP | Your IP only | API (optional: proxied through frontend) |
-| 8000 | TCP | 172.x.x.x (Docker network) | vLLM — internal only |
-| 8001 | TCP | 172.x.x.x (Docker network) | ChromaDB — internal only |
-
-For production, add an Nginx reverse proxy container that serves the frontend on port 443 (HTTPS) and proxies `/api/*` to the FastAPI service — removing the need to expose port 8002 directly.
+| Port | Source | Purpose |
+|------|--------|---------|
+| 22 | Your IP only | SSH |
+| 3000 | Your IP only | Frontend dashboard |
+| 8002 | Your IP only | API (or proxy through frontend) |
+| 8000 | Docker network only | vLLM — internal |
+| 8001 | Docker network only | ChromaDB — internal |
 
 ### Implementation Steps
 
-The following steps build the frontend stack in order. Each step is independently testable.
-
-**Step 1 — FastAPI skeleton**
-
-Create `services/api/` with a minimal FastAPI app that proxies requests to vLLM and returns a response. Verify with `curl http://localhost:8002/api/health`.
-
-**Step 2 — Parallel RAG + base calls**
-
-Implement `core/comparator.py`: use `asyncio.gather()` to run the base call and the ChromaDB retrieval + RAG call concurrently. Return both responses with timing metadata.
-
-**Step 3 — Metrics computation**
-
-Implement `core/metrics.py`: grounding score (keyword overlap between RAG response and retrieved chunks), personalisation score (ratio of health-profile-specific terms in the response), JSON validity flag.
-
-**Step 4 — SSE streaming**
-
-Wrap the vLLM streaming endpoint so tokens flow through FastAPI to the browser via Server-Sent Events. This allows the UI to stream the RAG response in real time while the base response is shown as a completed block.
-
-**Step 5 — React scaffold**
-
-Initialise the Vite + React + Tailwind project in `services/frontend/`. Create the sidebar navigation and five view shells (Chat & Compare, Analytics, Knowledge Base, Health Profile, Model Config).
-
-**Step 6 — Chat & Compare view**
-
-Implement `ChatPanel`, `ComparePanel`, `SourcesPanel`, and `MetricsBar` components. Wire to `POST /api/chat` with SSE streaming for the RAG response token stream.
-
-**Step 7 — Analytics view**
-
-Use `recharts` for session-level charts (latency trend, similarity distribution, collection breakdown).
-
-**Step 8 — Knowledge Base explorer**
-
-Implement ChromaDB search via `POST /api/search` and display results with similarity scores and document metadata.
-
-**Step 9 — Docker integration**
-
-Add `api` and `frontend` services to `docker-compose.yml`. Test full stack with `make start`.
-
-**Step 10 — EC2 Security Group**
-
-Restrict inbound rules so only SSH (22) and the dashboard port (3000) are accessible from your IP. All AI service ports remain internal.
-
-### Makefile Additions
-
-```makefile
-test-api:          # curl /api/health and print service status
-start-frontend:    # docker compose up api frontend -d
-logs-frontend:     # docker compose logs -f api frontend
-build-frontend:    # docker compose build api frontend
-```
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | FastAPI skeleton + `/api/health` endpoint | ✅ Complete |
+| 2 | Parallel RAG + base comparator with ChromaDB v2 UUID querying | ✅ Complete |
+| 3 | Metrics computation (grounding score, token counts) | ✅ Complete (included in Step 2) |
+| 4 | SSE streaming for token-by-token frontend delivery | 🔜 Next |
+| 5 | React + Vite + Tailwind scaffold with sidebar navigation | 🔜 Planned |
+| 6 | Chat & Compare view (ChatPanel, ComparePanel, SourcesPanel, MetricsBar) | 🔜 Planned |
+| 7 | Analytics view with recharts session charts | 🔜 Planned |
+| 8 | Knowledge Base explorer (ChromaDB search UI) | 🔜 Planned |
+| 9 | Docker integration + `make start` full stack test | 🔜 Planned |
+| 10 | EC2 Security Group lockdown | 🔜 Planned |
 
 ---
 
@@ -722,7 +628,7 @@ EOF
 ## Running the System
 
 ```bash
-make start    # Start all services (including api and frontend when implemented)
+make start    # Start all services (vllm, vector-db, api)
 make logs     # Watch startup logs — wait for: INFO: Application startup complete.
 make stop     # Stop all services
 ```
@@ -742,32 +648,30 @@ make test-llm
 ```bash
 source ~/.venv-rag/bin/activate
 
-# Verify all ChromaDB collections are reachable
 python scripts/test_rag.py --health-check
-
-# Single RAG query (meal plan, gym program, grocery list, lab analysis)
-python scripts/test_rag.py --type meal_plan
-python scripts/test_rag.py --type gym_program
-python scripts/test_rag.py --type lab_analysis
-
-# RAG vs no-RAG side-by-side comparison
 python scripts/test_rag.py --type meal_plan --compare
 python scripts/test_rag.py --type lab_analysis --compare
-
-# Full evaluation suite (4 test cases × 2 modes → rag/evaluation_results.json)
 python scripts/test_rag.py --evaluate
 ```
 
-### API middleware test (Module 7)
+### API middleware test
 
 ```bash
-make test-api
+# Health check
+curl http://localhost:8002/api/health | python3 -m json.tool
 
-# Or manually:
-curl http://localhost:8002/api/health
+# Full comparison request
+curl -s http://localhost:8002/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How much protein should I eat for muscle gain?",
+    "health_profile": { "weight_kg": 80, "goal": "muscle_gain" },
+    "query_type": "meal_plan",
+    "top_k": 4
+  }' | python3 -m json.tool
 ```
 
-### Manual curl test
+### Manual vLLM test
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -828,30 +732,15 @@ nvidia-smi
 ### Migration steps
 
 ```bash
-# 1. Complete Fresh Server Setup Guide above
-
-# 2. Clone the repo
 git clone git@github.com:gharaehs/ai-health-orchestration.git
 cd ai-health-orchestration
-
-# 3. Download the model (~15 GB)
 export HF_TOKEN="hf_your_token_here"
 bash scripts/download_model.sh
-
-# 4. Start services
 make start
-
-# 5. Transfer corpus files (from original machine)
 scp -r ./data/corpus/ user@new-server:~/ai-health-orchestration/data/
-
-# 6. Re-run ingestion
-source ~/.venv-rag/bin/activate
-python3 scripts/ingest.py
-
-# 7. Test
+source ~/.venv-rag/bin/activate && python3 scripts/ingest.py
 make test-llm
-python scripts/test_rag.py --health-check
-make test-api
+curl http://localhost:8002/api/health
 ```
 
 ---
@@ -860,74 +749,43 @@ make test-api
 
 ### vLLM crashes with CUDA Out of Memory
 
-**Fix:** Ensure `--enforce-eager` is present in the `docker-compose.yml` command section. Already applied in this repo.
+**Fix:** Ensure `--enforce-eager` is present in the `docker-compose.yml` command section.
 
 ### ChromaDB collections empty after restart
 
-**Cause:** Incorrect volume mount destination. ChromaDB writes to `/data` inside the container, not `/chroma/chroma`.
+**Fix:** Ensure `docker-compose.yml` mounts `./data/chroma:/data`. Re-run `python3 scripts/ingest.py` after fixing.
 
-**Fix:** Ensure `docker-compose.yml` has:
-```yaml
-volumes:
-  - ./data/chroma:/data
-```
-Re-run `python3 scripts/ingest.py` after fixing the mount.
+### ChromaDB v2 API — collection ID error
 
-### ChromaDB returns v1 API deprecated error
+**Symptom:** `"Collection ID is not a valid UUIDv4"`
 
-Expected behavior. ChromaDB 1.5.8 uses v2 API. Always use:
-```bash
-curl http://localhost:8001/api/v2/heartbeat   # ✅ correct
-curl http://localhost:8001/api/v1/heartbeat   # ❌ deprecated
-```
-The Python client (`chromadb.HttpClient`) handles this automatically.
+**Cause:** ChromaDB 1.5.8 requires UUID in query endpoint paths, not collection names.
 
-### RAG query times out
-
-**Cause:** vLLM generating 2,048 tokens on a T4 takes ~3–4 minutes. The default requests timeout of 120s is too short.
-
-**Fix:** Already set to 600s in `rag/pipeline.py`. If you see timeout errors, verify:
-```bash
-grep "timeout=" ~/ai-health-orchestration/rag/pipeline.py
-# Should show: timeout=600
-```
+**Fix:** Already handled in `comparator.py` — it fetches and caches the name→UUID mapping via `GET /collections` at first request.
 
 ### FastAPI cannot reach vLLM or ChromaDB
 
-**Cause:** Using `localhost` inside the `api` container — which only resolves to the container itself, not to sibling containers.
+**Cause:** Using `localhost` inside a Docker container resolves to that container only.
 
-**Fix:** Use Docker Compose service names. In `services/api/core/config.py`:
-```python
-VLLM_URL = "http://llm:8000"        # not http://localhost:8000
-CHROMA_URL = "http://vector-db:8001" # not http://localhost:8001
-```
-Both services must be on the same Docker network (the default `docker-compose.yml` network handles this automatically).
+**Fix:** Use Compose service names: `http://llm:8000` and `http://vector-db:8000`.
+
+> Note: ChromaDB's **internal** port is 8000 (mapped to host port 8001). Inside the Docker network always use `http://vector-db:8000`.
+
+### ChromaDB returns v1 API deprecated error
+
+Use `curl http://localhost:8001/api/v2/heartbeat` — v1 is deprecated in 1.5.8.
+
+### RAG query times out
+
+Timeout is set to 600s in `rag/pipeline.py` and `comparator.py`. T4 generation at 2,048 tokens takes 3–4 minutes normally.
 
 ### Docker build fails with "no space left on device"
 
-**Cause:** The vLLM image (~15 GB) requires temporary build cache space. At 80 GB total with model + corpus + existing image, there is insufficient free space for a rebuild.
-
-**Fix:** Do not rebuild the vLLM image. All runtime configuration is managed via the `command` override in `docker-compose.yml`. Simply edit that file and run `make stop && docker compose up -d`.
+Free space before building: `rm -rf ~/.cache/pip ~/.cache/JetBrains ~/.cache/huggingface`. Do not rebuild the vLLM image — use `docker-compose.yml` `command` overrides instead.
 
 ### vLLM uses FlashInfer instead of FlashAttention2
 
-**Not an error.** T4 GPU (compute capability 7.5) does not support FlashAttention2 (requires 8.0+). vLLM automatically falls back to FlashInfer, which works correctly on T4.
-
-### Training venv issues
-
-```bash
-source ~/.venv-training/bin/activate
-python training/train.py
-```
-
-If missing, recreate:
-```bash
-python3 -m venv ~/.venv-training
-source ~/.venv-training/bin/activate
-pip install "transformers==4.45.2" "peft==0.13.0" "trl==0.11.0" \
-            "accelerate==0.34.0" "bitsandbytes==0.43.3" "datasets==2.21.0" \
-            "torch==2.5.1" "pyyaml" "scipy" "rich"
-```
+Not an error. T4 (compute capability 7.5) does not support FlashAttention2 (requires 8.0+).
 
 ---
 
@@ -935,116 +793,48 @@ pip install "transformers==4.45.2" "peft==0.13.0" "trl==0.11.0" \
 
 ### ✅ Module 1 — Local LLM Deployment (Complete)
 
-**Completed:**
-- EC2 g4dn.xlarge provisioned with Ubuntu 22.04
-- NVIDIA drivers (535) + CUDA 12.2 installed and verified
-- Docker + Docker Compose + NVIDIA Container Toolkit configured
+- EC2 g4dn.xlarge + Ubuntu 22.04 + CUDA 12.2
 - vLLM serving Llama 3.1 8B via OpenAI-compatible API on port 8000
 - ChromaDB running on port 8001
 - CUDA OOM resolved with `--enforce-eager`
-
-**Key learnings:**
-- 1B parameters ≈ 2 GB VRAM in FP16
-- vLLM's PagedAttention enables efficient multi-request serving
-- T4 uses FlashInfer (not FlashAttention2) — correct and expected
-- CUDA graph warmup is the OOM culprit on T4; `--enforce-eager` solves it
 
 ---
 
 ### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA (Complete)
 
-**Completed:**
-- Switched from Mistral 7B AWQ to `meta-llama/Meta-Llama-3.1-8B-Instruct` fp16
-- Built 21-example health domain training dataset
-- QLoRA fine-tuning: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA (rank=16, alpha=32)
-- LoRA adapter trained and saved to `./models/adapters/health-v1/` (~161 MB)
-- Evaluation completed: base vs fine-tuned comparison across 5 test prompts
-
-**Training dataset categories:**
-
-| Category | Examples |
-|----------|----------|
-| Meal Plans | 10 |
-| Gym Programs | 5 |
-| Grocery Lists | 2 |
-| Lab / Blood Test Analysis | 2 |
-| Body Composition Assessment | 1 |
-| Complete Multi-Output Plans | 1 |
-
-**Key learnings:**
-- AWQ is inference-only — incompatible with LoRA training
-- BitsAndBytes 4-bit (NF4) is the correct format for QLoRA training
-- Single fp16 model serves both training and inference — no separate versions needed
-- 128K context window (vs Mistral's 4K) is critical for Module 4 RAG
+- QLoRA fine-tuning: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA rank=16 alpha=32
+- 21-example health domain training dataset
+- LoRA adapter saved to `./models/adapters/health-v1/` (~161 MB)
 
 ---
 
 ### ✅ Module 3 — Vector Database & RAG Corpus Ingestion (Complete)
 
-**Completed:**
-- Curated 4-category domain corpus from authoritative sources
-- Built `scripts/ingest.py`: full pipeline from raw files → text extraction → chunking → embedding → ChromaDB storage
-- Handles PDF (PyMuPDF), DOCX (python-docx), and CSV (pandas) file types
-- 4 isolated ChromaDB collections with category metadata for agent-specific retrieval
+- 4 ChromaDB collections, 13,349 documents ingested
+- Sources: JISSN position stands, ACSM guidelines, USDA food data, clinical lab references
 - Embedding model: `sentence-transformers/all-MiniLM-L6-v2` on CPU
-- Total: **13,349 documents** ingested
-
-**Corpus sources by category:**
-
-| Category | Key Sources |
-|----------|-------------|
-| Public health recommendations | ABIM lab reference ranges, NBME lab values, ACSM/AHA cholesterol guidelines, ESC cardiovascular prevention, ADA diabetes standards, Endocrine Society testosterone guidelines |
-| Nutrition guidelines | JISSN protein & nutrient timing position stands, WHO carbohydrate/fat guidelines, DRI tables (RDA/AI/UL for vitamins, minerals, macronutrients), Mediterranean diet meta-analyses |
-| Gym programming | ACSM 2026 resistance training position stand, ACSM 2009 progression models, IUSCA hypertrophy position stand, NSCA basics manual, periodization meta-analyses |
-| Food & recipes | All_Diets.csv (diet-categorized recipes with macros), USDA Foundation Foods (Dec 2025), USDA SR Legacy (2018) |
-
-**Key learnings:**
-- Chunking strategy must vary by document type — sliding window for prose, paragraph-boundary for reference docs, atomic chunks for recipes
-- Four isolated collections give agents precise retrieval scope without metadata filtering complexity
-- ChromaDB 1.5.8 uses v2 API — `api/v1` endpoint is deprecated
-- ChromaDB must be mounted to `/data` inside the container — not `/chroma/chroma`
 
 ---
 
 ### ✅ Module 4 — Retrieval-Augmented Generation (Complete)
 
-**Completed:**
-- Built `rag/` module: retriever, prompt builder, pipeline, and evaluation
-- `rag/retriever.py`: ChromaDB query logic with collection routing per output type
-- `rag/prompt_builder.py`: two prompt strategies — STRUCTURED (labelled context blocks) and NAIVE (flat concatenation baseline)
-- `rag/pipeline.py`: end-to-end orchestration — embed → retrieve → build prompt → call vLLM → parse JSON
-- `rag/evaluate.py`: RAG vs. no-RAG evaluation suite across 4 test cases
-- `scripts/test_rag.py`: CLI test tool with `--health-check`, `--compare`, `--evaluate` modes
-- Context window raised from 8,192 to 16,384 tokens via `docker-compose.yml` command override
-- ChromaDB volume mount fixed: `./data/chroma:/data` (was incorrectly `/chroma/chroma`)
-- Full end-to-end test passed: retrieval → augmented prompt → structured JSON generation
+- End-to-end RAG pipeline: embed → retrieve → augmented prompt → structured JSON
+- STRUCTURED prompt strategy with labelled context blocks per collection
+- Key finding: RAG returns 4-tier LDL clinical classification from ingested corpus vs. simplified flat range from base model
 
-**RAG pipeline metrics (lab analysis comparison):**
+**RAG pipeline metrics (lab analysis):**
 
 | Metric | With RAG | No RAG |
 |--------|----------|--------|
 | Latency | 58.8s | 37.1s |
-| Prompt tokens (est.) | 2,289 | 417 |
+| Prompt tokens | 2,289 | 417 |
 | Chunks retrieved | 6 | 0 |
-| JSON parse | ✅ | ✅ |
-
-**Key RAG vs. no-RAG finding — LDL reference range:**
-- **RAG:** `"Optimal: < 2.6 mmol/L, Near-optimal: 2.6–3.3, Borderline-high: 3.3–4.1, High: > 4.1"` ← from ingested ABIM/NBME clinical guidelines
-- **No-RAG:** `"2.5–3.5 mmol/L"` ← model estimate from training data
-
-The RAG system correctly applied 4-tier clinical classification directly from the ingested corpus. The no-RAG system produced a simplified, less accurate flat range — a medically meaningful difference.
-
-**Key learnings:**
-- Retrieval is fast (~0.3s for 10 chunks across 2 collections) — the latency overhead is entirely generation time
-- STRUCTURED prompt strategy (labelled context blocks per collection) produces better grounding than naive concatenation
-- `max_context_chars=12,000` fits comfortably within the 16,384 token window alongside the health profile, schema, and 2,048-token output budget
-- ChromaDB volume mount to the wrong container path causes silent data loss on restart — always verify with `ls data/chroma/` after first ingestion
 
 ---
 
 ### 🔜 Module 5 — Agentic AI / Multi-Agent Orchestration (Next)
 
-Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent — each with dedicated ChromaDB collection scope, coordinating via structured intermediate outputs through an orchestration loop.
+Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent coordinating via structured intermediate outputs.
 
 ---
 
@@ -1054,16 +844,39 @@ Planned: Expose health data, workout history, and recipe database via MCP server
 
 ---
 
-### 🔜 Frontend Dashboard (Planned)
+### 🔄 Frontend Dashboard — In Progress
 
-See the [Frontend Dashboard — Architecture & Plan](#frontend-dashboard--architecture--plan) section above for full details.
+**Steps complete:**
 
-**Planned deliverables:**
-- `services/api/` — FastAPI middleware with parallel RAG + base execution and metrics computation
-- `services/frontend/` — React + Vite + Tailwind dashboard with five views
-- Updated `docker-compose.yml` with `api` and `frontend` services
-- Updated `Makefile` with frontend management commands
-- EC2 Security Group configuration locked to your IP on port 3000
+**✅ Step 1 — FastAPI skeleton**
+- `services/api/` with FastAPI + Uvicorn
+- `GET /api/health` verifying vLLM and ChromaDB connectivity
+- Added to `docker-compose.yml` on port 8002
+
+**✅ Step 2 — Parallel RAG + base comparator**
+- `core/comparator.py`: `asyncio.gather()` runs base call and ChromaDB retrieval concurrently
+- `core/metrics.py`: grounding score (keyword overlap), approximate token counting
+- ChromaDB v2 fix: fetch collection UUIDs via `GET /collections`, cache name→UUID map, use UUIDs for all query requests
+- `sentence-transformers/all-MiniLM-L6-v2` embedded in the API container for query embedding
+- `POST /api/chat` verified end-to-end: 8 chunks retrieved, RAG response grounded in JISSN corpus
+
+**Key learnings from frontend Steps 1–2:**
+- ChromaDB's internal Docker port is 8000, not 8001 — the host mapping `8001→8000` only applies outside the Docker network
+- ChromaDB v2 API requires collection UUIDs in query paths — collection names work for metadata GET but not for `/query`
+- `docker system prune` reclaims almost nothing if the build cache is already clean — the real space hogs are pip cache, JetBrains IDE cache, and unused Python venvs
+- The `--no-deps` flag on `docker compose up --build` prevents Docker from re-pulling the 15GB vLLM image unnecessarily
+
+**Steps remaining:**
+
+| Step | Description |
+|------|-------------|
+| 4 | SSE streaming for token-by-token delivery to browser |
+| 5 | React + Vite + Tailwind scaffold with sidebar navigation |
+| 6 | Chat & Compare view with all four panels |
+| 7 | Analytics view with session charts (recharts) |
+| 8 | Knowledge Base explorer |
+| 9 | Docker integration + full stack test |
+| 10 | EC2 Security Group lockdown |
 
 ---
 
@@ -1078,8 +891,6 @@ See the [Frontend Dashboard — Architecture & Plan](#frontend-dashboard--archit
 | LoRA training | ✅ fp16 + BitsAndBytes | ❌ AWQ is inference-only |
 | Single model train + serve | ✅ Yes | ❌ Requires separate versions |
 
-The 128K context window was the decisive factor — essential for Module 4 RAG where retrieved documents, user health profiles, and conversation history must fit in a single context.
-
 ### Why FastAPI + React over Streamlit or Gradio?
 
 | Factor | FastAPI + React | Streamlit / Gradio |
@@ -1088,42 +899,34 @@ The 128K context window was the decisive factor — essential for Module 4 RAG w
 | SSE token streaming | ✅ First-class | ⚠️ Limited |
 | Custom analytics UI | ✅ Full control | ❌ Constrained widgets |
 | Production extensibility | ✅ Yes (Module 5+) | ❌ Prototype-only |
-| Existing stack integration | ✅ Clean Docker service | ⚠️ Separate process |
-
-Streamlit and Gradio are excellent for quick prototypes. For this system, where the UI must expose retrieved sources, per-chunk similarity scores, parallel response comparisons, and session-level analytics charts, a React frontend with a FastAPI middleware gives full control without fighting framework limitations.
 
 ### Why a FastAPI middleware instead of the frontend calling vLLM directly?
 
-Direct browser-to-vLLM calls would require exposing port 8000 to the public internet, introducing security risk. The middleware also enables logic that cannot live in the browser: parallel execution of the RAG and base paths with `asyncio.gather()`, metrics computation, and streaming response aggregation.
+Direct browser-to-vLLM calls require exposing port 8000 publicly. The middleware also enables logic that cannot run in the browser: parallel `asyncio.gather()` execution, grounding score computation, and ChromaDB UUID resolution.
 
 ### Why STRUCTURED over NAIVE prompt strategy?
 
-The STRUCTURED strategy groups retrieved chunks by collection and labels each section (e.g. `[CONTEXT: Clinical Lab Reference Ranges & Health Guidelines]`). This tells the model exactly what each block of text represents and strongly encourages it to use and cite the retrieved data. The NAIVE strategy (flat concatenation) produces lower-quality grounding because the model cannot distinguish the source or authority of each chunk.
+Labelled context blocks (`[CONTEXT: Clinical Lab Reference Ranges]`) tell the model the source and authority of each chunk, producing stronger grounding than flat concatenation.
 
 ### Why four separate ChromaDB collections?
 
-Each agent in the multi-agent architecture (Module 5) queries only the domain relevant to its task. A Lab Analysis Agent should never retrieve a recipe when looking up an LDL threshold. Collection-level isolation enforces this separation cleanly without complex metadata filtering logic in every query.
+Each agent in Module 5 queries only its relevant domain. A Lab Analysis Agent should never retrieve a recipe when looking up an LDL threshold. Collection-level isolation enforces this without metadata filtering complexity.
 
 ### Why CPU for embeddings?
 
-The ingestion pipeline and runtime retrieval both use `all-MiniLM-L6-v2` on CPU. This preserves the T4's full 16 GB VRAM for Llama 3.1 inference. The embedding model is fast enough on CPU (~0.3s per query) for the query volumes this system handles.
+Preserves the T4's full 16 GB VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on CPU runs in ~0.3s per query — fast enough for this workload.
 
 ### Why vLLM over llama.cpp?
 
-| Factor | vLLM (chosen) | llama.cpp |
-|--------|--------------|-----------|
-| T4 GPU utilization | Excellent | Good but suboptimal |
-| Throughput | High (PagedAttention) | Lower |
-| OpenAI-compatible API | Built-in | Requires wrapper |
-| Best use case | GPU server | CPU / laptop |
+vLLM is purpose-built for GPU servers: PagedAttention, built-in OpenAI-compatible API, first-class Docker support. llama.cpp is best for CPU or laptop environments.
 
 ### Why ChromaDB over FAISS?
 
-ChromaDB runs as a persistent server with a REST API, accessible from any container in the compose stack. FAISS is a library embedded in application code — unsuitable for a multi-service Docker architecture where multiple agents need independent access to vector storage.
+ChromaDB runs as a persistent server with a REST API accessible from all containers. FAISS is a library embedded in application code — unsuitable for a multi-service Docker architecture.
 
 ### Why runtime flags in docker-compose.yml instead of the Dockerfile?
 
-The vLLM image is ~15 GB. Rebuilding it on the T4 instance requires temporary build cache space equal to the image size, which exhausts the 80 GB disk. All vLLM configuration is therefore managed via the `command` override in `docker-compose.yml`, which takes effect at container start without a rebuild.
+The vLLM image is ~15 GB. Rebuilding on the T4's 80 GB disk exhausts available space. The `command` override in `docker-compose.yml` takes effect at container start with no rebuild.
 
 ---
 
@@ -1137,4 +940,4 @@ The vLLM image is ~15 GB. Rebuilding it on the T4 instance requires temporary bu
 
 ---
 
-*Last updated: Modules 1, 2, 3 & 4 complete — Frontend dashboard planned — May 2026*
+*Last updated: Modules 1–4 complete · Frontend Steps 1–2 complete · May 2026*
