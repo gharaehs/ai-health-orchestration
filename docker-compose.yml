@@ -24,6 +24,7 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+
   vector-db:
     image: chromadb/chroma:latest
     ports:
@@ -31,13 +32,23 @@ services:
     volumes:
       - ./data/chroma:/data
     restart: unless-stopped
+
   api:
     build: ./services/api
     ports:
       - "8002:8002"
     environment:
       - VLLM_URL=http://llm:8000
-      - CHROMA_URL=http://vector-db:8001
+      - CHROMA_URL=http://vector-db:8000
     depends_on:
       - llm
       - vector-db
+    restart: unless-stopped
+
+  frontend:
+    build: ./services/frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
