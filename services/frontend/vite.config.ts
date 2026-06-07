@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
@@ -11,6 +10,8 @@ export default defineConfig({
       '/api': {
         target: 'http://api:8002',
         changeOrigin: true,
+        timeout: 600000,
+        proxyTimeout: 600000,
       },
     },
   },
