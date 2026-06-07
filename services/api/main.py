@@ -4,8 +4,9 @@ import httpx
 from core.config import VLLM_URL, CHROMA_URL
 from routes.chat import router as chat_router
 from routes.search import router as search_router
+from routes.orchestrate import router as orchestrate_router
 
-app = FastAPI(title="Health AI Orchestration API", version="0.3.0")
+app = FastAPI(title="Health AI Orchestration API", version="0.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,6 +17,8 @@ app.add_middleware(
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
+app.include_router(orchestrate_router, prefix="/api")
+
 
 @app.get("/api/health")
 async def health():
@@ -41,5 +44,6 @@ async def health():
         status["chromadb"] = {"status": "ok", "collections": len(collections)}
     except Exception as e:
         status["chromadb"] = {"status": "error", "detail": str(e)}
+
     overall = "ok" if all(v["status"] == "ok" for v in status.values()) else "degraded"
     return {"status": overall, "services": status}

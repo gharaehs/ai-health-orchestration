@@ -34,7 +34,9 @@ services:
     restart: unless-stopped
 
   api:
-    build: ./services/api
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
     ports:
       - "8002:8002"
     environment:
