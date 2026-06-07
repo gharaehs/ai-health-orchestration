@@ -38,9 +38,9 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 | Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | ✅ Complete |
 | Module 3 | Vector Database & RAG Corpus Ingestion | ✅ Complete |
 | Module 4 | Retrieval-Augmented Generation (RAG) | ✅ Complete |
-| Module 5 | Agentic AI / Multi-Agent Orchestration | 🔜 Next |
+| Module 5 | Agentic AI / Multi-Agent Orchestration | ✅ Complete |
 | Module 6 | Model Context Protocol (MCP) | 🔜 Planned |
-| Frontend | Analytics Dashboard & Chat Interface | ✅ Complete (Steps 1–9 of 10) |
+| Frontend | Analytics Dashboard & Orchestration UI | ✅ Complete |
 
 **Core capabilities:**
 - Ingest structured health data (scale metrics, blood tests, medical history)
@@ -73,9 +73,10 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 │  │   FastAPI Container  │    │   React/Vite Container        │   │
 │  │   Port: 8002         │    │   Port: 3000                  │   │
 │  │                      │    │                               │   │
-│  │  Parallel RAG+base   │    │  Chat & Compare               │   │
-│  │  ChromaDB retrieval  │    │  Analytics charts             │   │
-│  │  Grounding metrics   │    │  Knowledge Base search        │   │
+│  │  RAG pipeline        │    │  Chat & Compare               │   │
+│  │  Multi-agent orch.   │    │  Orchestrate (Module 5)       │   │
+│  │  Async job system    │    │  Analytics charts             │   │
+│  │  ChromaDB retrieval  │    │  Knowledge Base search        │   │
 │  └──────────────────────┘    │  Health Profile form          │   │
 │                              └──────────────────────────────┘   │
 │    ./models/llama/       (mounted volume, not in git)           │
@@ -86,7 +87,33 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Data flow (Module 4 RAG pipeline):**
+**Multi-agent pipeline (Module 5):**
+
+```
+HealthProfile + UserGoals
+    │
+    ▼
+Orchestrator
+    │
+    ├── 1. LabAnalysisAgent  → public_health_recommendations
+    │       interprets blood markers against clinical reference ranges
+    │       outputs: dietary_constraints, training_constraints, TDEE, target_calories
+    │
+    ├── 2. NutritionAgent    → nutrition_guidelines + food_and_recipes
+    │       generates 7-day meal plan (split: Mon–Thu + Fri–Sun)
+    │       consumes: dietary_constraints, recommended_calories from Lab Analysis
+    │
+    ├── 3. TrainingAgent     → gym_programming
+    │       generates weekly gym program (sets, reps, progression)
+    │       consumes: training_constraints from Lab Analysis
+    │
+    └── 4. GroceryAgent      → food_and_recipes
+            aggregates ingredients across 7 days into shopping list
+            uses: per-category LLM consolidation (fuzzy deduplication)
+            consumes: weekly_plan from Nutrition Agent
+```
+
+**RAG pipeline (Module 4):**
 
 ```
 User Query (health profile + goal)
@@ -95,33 +122,9 @@ User Query (health profile + goal)
 HealthRAGPipeline (rag/pipeline.py)
     │
     ├── 1. Embed query → sentence-transformers/all-MiniLM-L6-v2 (CPU)
-    │
-    ├── 2. Retrieve → ChromaDB (port 8001)
-    │       ├── nutrition_guidelines      ← Macros, DRIs, dietary patterns
-    │       ├── food_and_recipes          ← Recipes + USDA nutrient data
-    │       ├── gym_programming           ← Rep ranges, periodization
-    │       └── public_health_recs        ← Lab markers, clinical thresholds
-    │
-    ├── 3. Build augmented prompt → HealthPromptBuilder (STRUCTURED strategy)
-    │       └── [CONTEXT: <collection label>] + retrieved chunks + user request
-    │
-    └── 4. Generate → vLLM API (port 8000)
-            └── Structured JSON response (meal plan / gym program / lab analysis)
-```
-
-**Data flow (Frontend API middleware):**
-
-```
-Browser (port 3000)
-    │  POST /api/chat
-    ▼
-FastAPI Middleware (port 8002)
-    │
-    ├── asyncio.gather()
-    │       ├── Base call → vLLM (no context)
-    │       └── Embed query → ChromaDB retrieval → augmented prompt → vLLM
-    │
-    └── Return: base_response + rag_response + sources + grounding metrics
+    ├── 2. Retrieve → ChromaDB (port 8001) — collection routed by query type
+    ├── 3. Build augmented prompt → STRUCTURED strategy (labelled context blocks)
+    └── 4. Generate → vLLM API (port 8000) → Structured JSON response
 ```
 
 ---
@@ -161,15 +164,26 @@ ai-health-orchestration/
 ├── .gitignore
 ├── README.md
 │
+├── agents/                         # ✅ Module 5: Multi-agent orchestration
+│   ├── __init__.py
+│   ├── schemas.py                  # Pydantic I/O contracts for all agents
+│   ├── base.py                     # Abstract BaseAgent: RAG, LLM, retry, JSON parsing
+│   ├── orchestrator.py             # Pipeline coordinator — sequential execution
+│   ├── lab_analysis_agent.py       # Agent 1: blood marker interpretation
+│   ├── nutrition_agent.py          # Agent 2: 7-day meal plan (split generation)
+│   ├── training_agent.py           # Agent 3: weekly gym program
+│   └── grocery_agent.py            # Agent 4: per-category shopping list
+│
 ├── services/
 │   ├── llm/
 │   │   └── Dockerfile              # vLLM container configuration
 │   ├── api/                        # ✅ FastAPI middleware
-│   │   ├── Dockerfile
-│   │   ├── main.py                 # FastAPI app + /api/health + /api/search
+│   │   ├── Dockerfile              # Copies agents/ and rag/ from project root
+│   │   ├── main.py                 # FastAPI app — registers all routers
 │   │   ├── routes/
-│   │   │   ├── chat.py             # POST /api/chat (parallel RAG + base calls)
-│   │   │   └── search.py           # POST /api/search (Knowledge Base explorer)
+│   │   │   ├── chat.py             # POST /api/chat (parallel RAG + base)
+│   │   │   ├── search.py           # POST /api/search (Knowledge Base)
+│   │   │   └── orchestrate.py      # POST /api/orchestrate (async job system)
 │   │   ├── core/
 │   │   │   ├── comparator.py       # asyncio.gather() RAG vs base runner
 │   │   │   ├── metrics.py          # Grounding score, token count helpers
@@ -178,18 +192,19 @@ ai-health-orchestration/
 │   └── frontend/                   # ✅ React/Vite dashboard
 │       ├── Dockerfile
 │       ├── package.json
-│       ├── vite.config.ts          # Vite config + proxy to api:8002
+│       ├── vite.config.ts
 │       └── src/
-│           ├── App.tsx             # Full dashboard — all 5 views in one file
-│           ├── useChat.ts          # Fetch hook with auto query-type detection
-│           ├── types.ts            # TypeScript interfaces
+│           ├── App.tsx             # Full dashboard — 6 views including Orchestrate
+│           ├── useChat.ts
+│           ├── types.ts
 │           ├── main.tsx
 │           └── index.css
 │
 ├── scripts/
 │   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
 │   ├── ingest.py                   # Module 3: RAG corpus ingestion pipeline
-│   └── test_rag.py                 # Module 4: RAG pipeline CLI test tool
+│   ├── test_rag.py                 # Module 4: RAG pipeline CLI test tool
+│   └── test_orchestration.py       # Module 5: full pipeline CLI test tool
 │
 ├── rag/                            # Module 4: RAG pipeline
 │   ├── __init__.py
@@ -202,23 +217,19 @@ ai-health-orchestration/
 │   ├── train.py                    # QLoRA fine-tuning script
 │   ├── evaluate.py                 # Base vs fine-tuned comparison
 │   ├── config.yaml                 # Training hyperparameters
-│   ├── evaluation_results.json     # Module 2 evaluation output
+│   ├── evaluation_results.json
 │   └── dataset/
 │       └── processed/
-│           └── health_training_data.jsonl   # 21 training examples
+│           └── health_training_data.jsonl
 │
-├── models/                         # ⚠️ NOT IN GIT — downloaded locally
+├── models/                         # ⚠️ NOT IN GIT
 │   ├── llama/                      # Llama 3.1 8B Instruct fp16 (~15 GB)
 │   └── adapters/
 │       └── health-v1/              # LoRA adapter from Module 2 (~161 MB)
 │
 └── data/
     ├── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
-    └── corpus/                     # ⚠️ NOT IN GIT — raw corpus files for ingestion
-        ├── public_health_recommendations/
-        ├── nutrition_guidelines/
-        ├── gym_programming/
-        └── food_and_recipes/
+    └── corpus/                     # ⚠️ NOT IN GIT — raw corpus files
 ```
 
 ---
@@ -228,213 +239,113 @@ ai-health-orchestration/
 ### LLM Service — vLLM + Llama 3.1 8B Instruct
 
 - **Image:** `vllm/vllm-openai:latest`
-- **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, on-the-fly 4-bit quantization via BitsAndBytes)
+- **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, on-the-fly 4-bit via BitsAndBytes)
 - **Port:** `8000`
-- **API:** OpenAI-compatible (`/v1/chat/completions`, `/v1/models`, etc.)
-- **Runtime flags** (set via `docker-compose.yml` command override):
-  - `--dtype float16` — serves fp16 model efficiently on T4
-  - `--max-model-len 16384` — 16K context window for RAG use
-  - `--gpu-memory-utilization 0.85` — reserves 15% VRAM as safety buffer
-  - `--max-num-seqs 8` — limits concurrent sequences
-  - `--enforce-eager` — disables CUDA graph capture (required for T4, prevents OOM)
-  - `--quantization bitsandbytes` + `--load-format bitsandbytes` — on-the-fly 4-bit quantization
-
-> **Why `--enforce-eager`?** The T4 GPU (compute capability 7.5) does not support vLLM's default CUDA graph warmup which causes OOM. Slightly slower for high-throughput but correct for single-user inference.
-
-> **Why runtime flags in `docker-compose.yml`?** The vLLM image (~15 GB) cannot be rebuilt on the T4 without exhausting the 80 GB disk. The `command` override bypasses the Dockerfile `CMD` at runtime — no rebuild needed.
+- **API:** OpenAI-compatible (`/v1/chat/completions`, `/v1/models`)
+- **Runtime flags:** `--dtype float16` · `--max-model-len 16384` · `--gpu-memory-utilization 0.85` · `--enforce-eager` · `--quantization bitsandbytes`
 
 ### Vector Database — ChromaDB
 
-- **Image:** `chromadb/chroma:latest`
-- **Version:** 1.5.8 (v2 API)
-- **Port:** `8001` (host) → `8000` (container internal)
-- **Storage:** `./data/chroma/` mounted to `/data` inside the container
-- **Collections:** 4 domain-specific collections (13,349 documents total)
+- **Image:** `chromadb/chroma:latest` (v1.5.8)
+- **Port:** `8001` (host) → `8000` (internal)
+- **Storage:** `./data/chroma:/data`
+- **Collections:** 4 domain-specific collections (13,349 documents)
 
-> **Critical — internal port:** ChromaDB's internal port is `8000`, not `8001`. Inside the Docker network always use `http://vector-db:8000`.
+### API Middleware — FastAPI
 
-> **Critical — volume mount:** ChromaDB writes to `/data` inside the container. The correct bind is `./data/chroma:/data`. Using `/chroma/chroma` causes silent data loss on restart.
-
-### API Middleware — FastAPI ✅
-
-- **Framework:** FastAPI + Uvicorn
 - **Port:** `8002`
-- **Key endpoints:**
-  - `POST /api/chat` — parallel RAG + base calls via `asyncio.gather()`; returns both responses + retrieved sources + metrics
-  - `POST /api/search` — direct ChromaDB vector search for the Knowledge Base view
-  - `GET /api/health` — liveness check for all downstream services (vLLM, ChromaDB)
+- **Endpoints:**
+  - `POST /api/chat` — parallel RAG + base via `asyncio.gather()`
+  - `POST /api/search` — ChromaDB vector search
+  - `POST /api/orchestrate` — start async pipeline job, returns `{job_id}`
+  - `GET /api/orchestrate/status/{job_id}` — poll job status
+  - `GET /api/orchestrate/result/{job_id}` — fetch completed result
+  - `GET /api/health` — liveness check
 
-> **ChromaDB v2 UUID routing:** Query endpoints require collection UUIDs, not names. `comparator.py` fetches and caches the name→UUID mapping at first request via `GET /collections`.
+### Frontend Dashboard — React + Vite
 
-### Frontend Dashboard — React + Vite ✅
-
-- **Framework:** React 18 + TypeScript + Vite
-- **Styling:** Tailwind CSS
-- **Charts:** Recharts
 - **Port:** `3000`
-- **Proxy:** `/api/*` proxied to `http://api:8002` inside the Docker network
-- **Views:**
-  - **Chat & Compare** — query input, side-by-side base vs RAG responses, scrollable sources panel with similarity scores and document metadata, quality metrics row
-  - **Analytics** — session latency trend (line chart) and grounding score history (bar chart)
-  - **Knowledge Base** — direct ChromaDB vector search with similarity scores and document metadata
-  - **Health Profile** — body metrics, blood markers, goal selector, medical notes — persisted in state and included in every query
-  - **Config** — top-k parameter control, system info panel
+- **Views:** Chat & Compare · Orchestrate · Analytics · Knowledge Base · Health Profile · Config
 
 ---
 
 ## Frontend Dashboard
 
-### Architecture
+### Orchestrate Tab (Module 5)
 
-```
-Browser (port 3000)
-    │
-    ▼
-React/Vite (services/frontend)
-    │  /api/* proxied to api:8002
-    ▼
-FastAPI Middleware (services/api, port 8002)
-    │
-    ├── asyncio.gather()
-    │       ├── vLLM base call (no context)             → llm:8000
-    │       └── ChromaDB embed+retrieve → vLLM RAG call → llm:8000
-    │
-    └── JSON: base_response + rag_response + sources + metrics
-```
+The Orchestrate tab runs the full 4-agent pipeline from the browser:
 
-### API Contract
+1. Browser POSTs to `/api/orchestrate` → receives `{job_id}` immediately
+2. Browser polls `/api/orchestrate/status/{job_id}` every 10 seconds
+3. When status is `"complete"`, browser fetches `/api/orchestrate/result/{job_id}`
+4. Results display in collapsible panels per agent
 
-#### `POST /api/chat`
+This async job pattern avoids long-held HTTP connections through the Vite proxy, which cannot hold connections open for 7+ minutes.
 
-Request:
+**Agent output panels:**
+- **🔬 Lab Analysis** — TDEE, caloric target, dietary constraints, training constraints, per-marker interpretation with status and reference ranges
+- **🥗 Nutrition Plan** — 7-day meal plan with daily macro totals and per-meal breakdown
+- **🏋️ Training Program** — weekly sessions with exercises, sets/reps, and 4-week progression scheme
+- **🛒 Grocery List** — consolidated shopping list by category with quantities
+
+### API Contract (Orchestration)
+
+#### `POST /api/orchestrate`
 ```json
 {
-  "query": "How much protein should I eat for muscle gain?",
-  "health_profile": { "weight_kg": 80, "lbm_kg": 66, "goal": "muscle_gain" },
-  "query_type": "meal_plan",
-  "top_k": 6
-}
-```
-
-`query_type` is auto-detected from keywords when not supplied:
-- `meal_plan` — food, eat, protein, calorie, recipe, diet
-- `gym_program` — workout, gym, exercise, lift, train, rep, set
-- `lab_analysis` — blood, lab, ldl, hdl, glucose, creatinine, marker
-- `general` — fallback, queries all 4 collections
-
-Response:
-```json
-{
-  "base_response":  { "content": "...", "latency_s": 14.6, "prompt_tokens": 74,  "completion_tokens": 247, "error": null },
-  "rag_response":   { "content": "...", "latency_s": 26.4, "prompt_tokens": 737, "completion_tokens": 392, "error": null },
-  "retrieval": {
-    "chunks_retrieved": 8,
-    "collections_queried": ["nutrition_guidelines", "food_and_recipes"],
-    "retrieval_latency_s": 0.31,
-    "sources": [
-      {
-        "score": 0.68,
-        "collection": "nutrition_guidelines",
-        "excerpt": "1.4 to 1.8 g·kg⁻¹·d⁻¹ for strength-trained athletes...",
-        "metadata": { "source": "JISSN Position Stand on Protein and Exercise.pdf" }
-      }
-    ]
+  "profile": {
+    "age": 38, "sex": "male", "height_cm": 178.0,
+    "scale_metrics": { "weight_kg": 88.5, "body_fat_pct": 22.0 },
+    "blood_markers": [
+      { "name": "LDL Cholesterol", "value": 3.8, "unit": "mmol/L" }
+    ],
+    "medical_history": [], "medications": [], "allergies": []
   },
-  "metrics": {
-    "grounding_score": 0.71,
-    "base_score": 0.0,
-    "rag_improvement": 0.71,
-    "latency_delta_s": 11.8
+  "goals": {
+    "primary_goal": "fat_loss",
+    "activity_level": "moderately_active",
+    "fitness_level": "intermediate",
+    "training_days_per_week": 4,
+    "dietary_preferences": []
   }
 }
 ```
 
-#### `POST /api/search`
+Returns: `{ "job_id": "a1b2c3d4", "status": "pending" }`
 
-```json
-{ "query": "protein synthesis resistance training", "top_k": 8 }
-```
+#### `GET /api/orchestrate/status/{job_id}`
+Returns: `{ "job_id": "...", "status": "running|complete|failed", "duration_s": null }`
 
-Returns `{ "sources": [...], "total": N }` — same source format as above.
-
-#### `GET /api/health`
-
-```json
-{
-  "status": "ok",
-  "services": {
-    "vllm":     { "status": "ok", "model": "/models/llama" },
-    "chromadb": { "status": "ok", "collections": 4 }
-  }
-}
-```
-
-### Implementation Steps
-
-| Step | Description | Status |
-|------|-------------|--------|
-| 1 | FastAPI skeleton + `/api/health` | ✅ Complete |
-| 2 | Parallel RAG + base comparator, ChromaDB v2 UUID querying | ✅ Complete |
-| 3 | Grounding score + token count metrics | ✅ Complete |
-| 4 | SSE token streaming | 🔜 Future enhancement |
-| 5 | React + Vite + Tailwind scaffold | ✅ Complete |
-| 6 | Chat & Compare view | ✅ Complete |
-| 7 | Analytics view with session charts | ✅ Complete |
-| 8 | Knowledge Base search explorer | ✅ Complete |
-| 9 | Docker containerisation + compose integration | ✅ Complete |
-| 10 | EC2 Security Group lockdown | 🔜 Before demo |
-
-### Key learnings from frontend build
-
-- ChromaDB's internal Docker port is `8000`, not `8001` — host mapping `8001→8000` only applies outside the Docker network
-- ChromaDB v2 requires collection UUIDs in query paths — names work for GET metadata but not `/query`
-- `verbatimModuleSyntax: true` in `tsconfig.app.json` breaks TypeScript interface imports in Vite — remove it
-- Vite proxy `target` must use Docker service name (`http://api:8002`) inside container, not `localhost`
-- `--no-deps` on `docker compose up --build` prevents unnecessary re-pull of the 15 GB vLLM image
-- Real disk space culprits: pip cache, JetBrains IDE cache, unused Python venvs — not Docker build cache
+#### `GET /api/orchestrate/result/{job_id}`
+Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`, `grocery`, `agent_results`, `total_duration_s`.
 
 ---
 
 ## Prerequisites
 
-Before running anything, the host server needs:
-
-1. **Ubuntu 22.04 LTS** (tested, recommended)
+1. **Ubuntu 22.04 LTS**
 2. **NVIDIA GPU drivers** (535+) and **CUDA 12.2**
 3. **Docker** + **Docker Compose plugin**
-4. **NVIDIA Container Toolkit** (GPU access inside Docker)
+4. **NVIDIA Container Toolkit**
 5. **Git**
-6. **Python 3.12 + python3.12-venv** (for model download, training, and ingestion scripts)
-7. **HuggingFace account** with Meta Llama 3.1 license accepted at `huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct`
+6. **Python 3.12 + python3.12-venv**
+7. **HuggingFace account** with Meta Llama 3.1 license accepted
 
 ---
 
 ## Fresh Server Setup Guide
 
-Follow these steps in order on a clean Ubuntu 22.04 server.
-
 ### Step 1 — Update System
-
 ```bash
 sudo apt update && sudo apt upgrade -y
 ```
 
 ### Step 2 — Verify GPU
-
 ```bash
 nvidia-smi
 ```
 
-Expected output:
-```
-+---------------------------------------------------------------------------------------+
-| NVIDIA-SMI 535.288.01   Driver Version: 535.288.01   CUDA Version: 12.2              |
-|   0  Tesla T4         Off      |  16160MiB VRAM                                      |
-+---------------------------------------------------------------------------------------+
-```
-
 ### Step 3 — Install Docker
-
 ```bash
 sudo apt install -y ca-certificates curl gnupg
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -445,26 +356,22 @@ https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
 sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 sudo apt update
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-sudo usermod -aG docker $USER
-newgrp docker
+sudo usermod -aG docker $USER && newgrp docker
 ```
 
 ### Step 4 — Install NVIDIA Container Toolkit
-
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
   sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
   sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
   sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt update
-sudo apt install -y nvidia-container-toolkit
+sudo apt update && sudo apt install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-### Step 5 — Install Git and Configure GitHub
-
+### Step 5 — Git + GitHub SSH
 ```bash
 sudo apt install -y git
 git config --global user.name "Your Name"
@@ -473,14 +380,12 @@ ssh-keygen -t ed25519 -C "your@email.com"
 cat ~/.ssh/id_ed25519.pub   # Add to GitHub → Settings → SSH keys
 ```
 
-### Step 6 — Install Python venv
-
+### Step 6 — Python venv
 ```bash
 sudo apt install -y python3.12-venv python-is-python3
 ```
 
-### Step 7 — Clone the Repository
-
+### Step 7 — Clone
 ```bash
 git clone git@github.com:gharaehs/ai-health-orchestration.git
 cd ai-health-orchestration
@@ -490,51 +395,31 @@ cd ai-health-orchestration
 
 ## Model Download
 
-The model is **not stored in git**. Run this once on every new server:
-
 ```bash
 export HF_TOKEN="hf_your_token_here"
 bash scripts/download_model.sh
 ```
 
-Downloads `meta-llama/Meta-Llama-3.1-8B-Instruct` (~15 GB) to `./models/llama/`. Takes 20–40 minutes.
+Downloads `meta-llama/Meta-Llama-3.1-8B-Instruct` (~15 GB) to `./models/llama/`.
 
 ---
 
 ## RAG Corpus Ingestion
 
-### Corpus Structure
-
-```
-data/corpus/
-├── public_health_recommendations/   # Lab reference PDFs, clinical guideline PDFs
-├── nutrition_guidelines/            # Research PDFs, DRI DOCX tables, WHO guidelines
-├── gym_programming/                 # ACSM/NSCA position stand PDFs, meta-analysis PDFs
-└── food_and_recipes/
-    ├── All_Diets.csv
-    ├── usda_foundation/             # Unzipped USDA Foundation Foods CSVs
-    └── usda_sr_legacy/              # Unzipped USDA SR Legacy CSVs
-```
-
-### Setup and Run
-
 ```bash
 python3 -m venv ~/.venv-rag
 source ~/.venv-rag/bin/activate
 pip install chromadb sentence-transformers pymupdf pandas tiktoken tqdm python-docx
-
-make start   # ChromaDB must be running first
+make start   # ChromaDB must be running
 python3 scripts/ingest.py
 ```
-
-### Collections Created
 
 | Collection | Documents | Content |
 |------------|-----------|---------|
 | `public_health_recommendations` | 4,246 | Lab reference ranges, clinical guidelines |
 | `nutrition_guidelines` | 881 | Research papers, DRI tables |
-| `gym_programming` | 416 | ACSM/NSCA position stands, meta-analyses |
-| `food_and_recipes` | 7,806 | Recipes with macros + USDA nutrient data |
+| `gym_programming` | 416 | ACSM/NSCA position stands |
+| `food_and_recipes` | 7,806 | Recipes + USDA nutrient data |
 | **Total** | **13,349** | |
 
 ---
@@ -542,62 +427,50 @@ python3 scripts/ingest.py
 ## Running the System
 
 ```bash
-make start    # Build and start all 4 services: llm, vector-db, api, frontend
+make start    # Build and start all 4 services
 make logs     # Watch startup logs
 make stop     # Stop all services
 ```
 
-Access the dashboard at `http://<your-ec2-public-ip>:3000`
+Access: `http://<your-ec2-public-ip>:3000`
 
 ---
 
 ## Testing & Verification
 
-### Full stack health check
-
+### Health check
 ```bash
 curl http://localhost:8002/api/health | python3 -m json.tool
 ```
 
-### LLM direct test
-
-```bash
-make test-llm
-```
-
-### RAG pipeline CLI tests
-
+### RAG pipeline
 ```bash
 source ~/.venv-rag/bin/activate
 python scripts/test_rag.py --health-check
-python scripts/test_rag.py --type meal_plan --compare
 python scripts/test_rag.py --type lab_analysis --compare
-python scripts/test_rag.py --evaluate
 ```
 
-### API chat endpoint test
-
+### Full orchestration pipeline (CLI)
 ```bash
-curl -s http://localhost:8002/api/chat \
+source ~/.venv-rag/bin/activate
+python scripts/test_orchestration.py
+python scripts/test_orchestration.py --minimal   # No blood markers
+python scripts/test_orchestration.py --output result.json
+```
+
+### Orchestration API
+```bash
+# Start a job
+JOB=$(curl -s -X POST http://localhost:8002/api/orchestrate \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "How much protein should I eat for muscle gain?",
-    "health_profile": { "weight_kg": 80, "goal": "muscle_gain" },
-    "query_type": "meal_plan",
-    "top_k": 4
-  }' | python3 -m json.tool
-```
+  -d "$(curl -s http://localhost:8002/api/orchestrate/sample-request)" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 
-### Check ChromaDB
+# Poll status
+curl -s http://localhost:8002/api/orchestrate/status/$JOB | python3 -m json.tool
 
-```bash
-curl http://localhost:8001/api/v2/heartbeat
-```
-
-### Check GPU memory
-
-```bash
-nvidia-smi
+# Fetch result when complete
+curl -s http://localhost:8002/api/orchestrate/result/$JOB | python3 -m json.tool | head -40
 ```
 
 ---
@@ -606,133 +479,88 @@ nvidia-smi
 
 | Command | Description |
 |---------|-------------|
-| `make start` | Build and start all 4 services in detached mode |
+| `make start` | Build and start all 4 services |
 | `make stop` | Stop and remove all containers |
-| `make logs` | Follow live logs from all containers |
-| `make download-model` | Download Llama 3.1 8B to `./models/llama/` |
-| `make test-llm` | Send a test prompt and display JSON response |
-| `make test-api` | Check FastAPI middleware health endpoint |
-| `make start-frontend` | Start only api and frontend containers |
-| `make logs-frontend` | Follow logs for api and frontend containers |
-| `make build-frontend` | Rebuild api and frontend Docker images |
+| `make logs` | Follow live logs |
+| `make download-model` | Download Llama 3.1 8B |
+| `make test-llm` | Send test prompt to vLLM |
+| `make build-frontend` | Rebuild api and frontend images |
 
 ---
 
 ## Migrating to a New Server
 
-| Data | Location | In Git? | Migrate how? |
-|------|----------|---------|--------------|
-| Code & config | GitHub | ✅ Yes | `git clone` |
-| Docker setup | GitHub | ✅ Yes | `git clone` |
-| RAG pipeline | GitHub | ✅ Yes | `git clone` |
-| Training scripts & dataset | GitHub | ✅ Yes | `git clone` |
-| Frontend & API source | GitHub | ✅ Yes | `git clone` |
-| Llama 3.1 model | `./models/llama/` | ❌ No | `bash scripts/download_model.sh` |
-| LoRA adapter | `./models/adapters/` | ❌ No | Re-train or `scp` |
-| Vector DB data | `./data/chroma/` | ❌ No | `scp` or re-run `ingest.py` |
-| Corpus files | `./data/corpus/` | ❌ No | `scp` from original machine |
-
-```bash
-git clone git@github.com:gharaehs/ai-health-orchestration.git
-cd ai-health-orchestration
-export HF_TOKEN="hf_your_token_here"
-bash scripts/download_model.sh
-make start
-scp -r ./data/corpus/ user@new-server:~/ai-health-orchestration/data/
-source ~/.venv-rag/bin/activate && python3 scripts/ingest.py
-curl http://localhost:8002/api/health
-# Dashboard: http://<ip>:3000
-```
+| Data | In Git? | Migrate how? |
+|------|---------|--------------|
+| Code & config | ✅ Yes | `git clone` |
+| Llama 3.1 model | ❌ No | `bash scripts/download_model.sh` |
+| LoRA adapter | ❌ No | Re-train or `scp` |
+| Vector DB data | ❌ No | `scp ./data/chroma/` or re-run `ingest.py` |
+| Corpus files | ❌ No | `scp ./data/corpus/` |
 
 ---
 
 ## Troubleshooting
 
-### vLLM crashes with CUDA Out of Memory
-
-Ensure `--enforce-eager` is in the `docker-compose.yml` command section.
+### vLLM OOM on startup
+Ensure `--enforce-eager` is in `docker-compose.yml` command. T4 cannot run CUDA graph warmup.
 
 ### ChromaDB collections empty after restart
+Volume must mount `./data/chroma:/data`. Re-run `ingest.py` if data is lost.
 
-Ensure `docker-compose.yml` mounts `./data/chroma:/data`. Re-run `python3 scripts/ingest.py`.
+### API 502 on orchestrate endpoint
+Check `docker compose logs api` — likely an import error. Rebuild: `docker compose build api && docker compose up -d api`.
 
-### ChromaDB v2 — collection ID error
+### Orchestration pipeline times out in browser
+The async job pattern (POST → poll status → fetch result) avoids proxy timeouts. All requests are short. If polling stops, check `docker compose logs api` for the job status.
 
-**Symptom:** `"Collection ID is not a valid UUIDv4"`
-
-Already handled in `comparator.py` — name→UUID map cached at first request. If it recurs, restart the api container to clear the cache.
-
-### FastAPI cannot reach vLLM or ChromaDB
-
-Use Compose service names, not `localhost`: `http://llm:8000` and `http://vector-db:8000`.
-
-ChromaDB's **internal** port is `8000` (host maps `8001→8000`). Always use `http://vector-db:8000` inside Docker.
-
-### Frontend shows API errors in browser console
-
-Check the Vite proxy target in `vite.config.ts` — must be `http://api:8002`, not `localhost:8002`. Check API logs: `docker compose logs api`.
-
-### tsconfig TypeScript import error
-
-**Symptom:** `The requested module does not provide an export named 'X'`
-
-Remove `"verbatimModuleSyntax": true`, `"noUnusedLocals": true`, and `"noUnusedParameters": true` from `tsconfig.app.json`. Already fixed in this repo.
-
-### ChromaDB returns v1 API deprecated error
-
-Use `curl http://localhost:8001/api/v2/heartbeat` — v1 is deprecated in ChromaDB 1.5.8.
-
-### RAG query times out
-
-Timeout is set to 600s in `rag/pipeline.py` and `comparator.py`. Normal generation on T4 is 15–60s depending on output length.
-
-### Docker build fails with "no space left on device"
-
-Free space first: `rm -rf ~/.cache/pip ~/.cache/JetBrains ~/.cache/huggingface`. Do not rebuild the vLLM image — use `docker-compose.yml` command overrides only.
+### Docker build fails — no space left on device
+```bash
+docker builder prune -af
+rm -rf ~/.cache/pip ~/.cache/JetBrains
+```
 
 ### vLLM uses FlashInfer instead of FlashAttention2
+Not an error. T4 (compute 7.5) does not support FlashAttention2 (requires 8.0+).
 
-Not an error. T4 (compute capability 7.5) does not support FlashAttention2 (requires 8.0+).
+### ChromaDB v2 UUID error
+Already handled — `comparator.py` caches name→UUID mapping. Restart api container to clear cache.
 
 ---
 
 ## Module Progress
 
-### ✅ Module 1 — Local LLM Deployment (Complete)
+### ✅ Module 1 — Local LLM Deployment
 
-- EC2 g4dn.xlarge + Ubuntu 22.04 + CUDA 12.2
 - vLLM serving Llama 3.1 8B via OpenAI-compatible API on port 8000
-- ChromaDB on port 8001, CUDA OOM resolved with `--enforce-eager`
+- `--enforce-eager` resolves T4 CUDA graph OOM
 
-**Key learnings:** 1B params ≈ 2 GB VRAM in FP16 · T4 uses FlashInfer not FlashAttention2 · CUDA graph warmup is the OOM culprit
+**Key learnings:** 1B params ≈ 2 GB VRAM · T4 uses FlashInfer · CUDA graph warmup is the OOM culprit
 
 ---
 
-### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA (Complete)
+### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA
 
 - QLoRA: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA rank=16 alpha=32
-- 21-example health domain training dataset across 6 categories
-- LoRA adapter: `./models/adapters/health-v1/` (~161 MB)
+- 21-example health domain dataset, LoRA adapter: `./models/adapters/health-v1/` (~161 MB)
 
-**Key learnings:** AWQ is inference-only · BitsAndBytes NF4 is correct for QLoRA · single fp16 model serves both training and inference
+**Key learnings:** AWQ is inference-only · BitsAndBytes NF4 is the correct QLoRA path
 
 ---
 
-### ✅ Module 3 — Vector Database & RAG Corpus Ingestion (Complete)
+### ✅ Module 3 — Vector Database & RAG Corpus Ingestion
 
 - 4 ChromaDB collections, 13,349 documents
-- Sources: JISSN position stands, ACSM guidelines, USDA food data, clinical lab references
 - Embedding: `sentence-transformers/all-MiniLM-L6-v2` on CPU
 
-**Key learnings:** Chunking varies by document type · ChromaDB 1.5.8 uses v2 API · volume must mount to `/data`
+**Key learnings:** ChromaDB 1.5.8 uses v2 API · volume must mount to `/data`
 
 ---
 
-### ✅ Module 4 — Retrieval-Augmented Generation (Complete)
+### ✅ Module 4 — Retrieval-Augmented Generation
 
 - End-to-end RAG: embed → retrieve → augmented prompt → structured JSON
-- STRUCTURED prompt strategy with labelled context blocks per collection
-- Key finding: RAG returns 4-tier LDL clinical classification from ingested corpus; base model returns simplified flat range
+- Key finding: RAG returns 4-tier LDL classification from corpus; base model returns simplified flat range
 
 | Metric | With RAG | No RAG |
 |--------|----------|--------|
@@ -740,99 +568,101 @@ Not an error. T4 (compute capability 7.5) does not support FlashAttention2 (requ
 | Prompt tokens | 2,289 | 417 |
 | Chunks retrieved | 6 | 0 |
 
-**Key learnings:** Retrieval ~0.3s — all overhead is generation · STRUCTURED outperforms naive concatenation
+---
+
+### ✅ Module 5 — Agentic AI / Multi-Agent Orchestration
+
+**Completed:**
+
+- `agents/schemas.py` — Pydantic I/O contracts for all agents (HealthProfile, UserGoals, LabAnalysisOutput, NutritionOutput, TrainingOutput, GroceryOutput, OrchestrationResult)
+- `agents/base.py` — abstract BaseAgent with shared RAG retrieval, LLM calling, JSON extraction, retry logic
+- `agents/lab_analysis_agent.py` — interprets blood markers against clinical guidelines from ChromaDB; calculates TDEE via Mifflin-St Jeor; outputs dietary and training constraints
+- `agents/nutrition_agent.py` — 7-day meal plan generated in two half-week LLM calls (Mon–Thu, Fri–Sun) to fit within 2048-token output budget; merged and validated as NutritionOutput
+- `agents/training_agent.py` — weekly gym program with exercises, sets/reps, rest periods, and 4-week progression scheme grounded in ACSM/NSCA guidelines
+- `agents/grocery_agent.py` — 85 raw ingredients pre-bucketed by keyword into 8 categories; one LLM call per category for fuzzy deduplication and quantity consolidation; final shopping notes via one small LLM call
+- `agents/orchestrator.py` — sequential pipeline coordinator; agents share one ChromaDB connection; each agent's output passed as context to downstream agents; never raises on agent failure
+- `scripts/test_orchestration.py` — CLI test tool with full and minimal profiles, `--output` flag for JSON export
+- `services/api/routes/orchestrate.py` — async job system: `POST /api/orchestrate` returns `job_id` immediately; pipeline runs in `ThreadPoolExecutor`; browser polls `/status/{job_id}` every 10s; result fetched from `/result/{job_id}`
+- `services/frontend/src/App.tsx` — Orchestrate tab with 4-agent progress cards, collapsible result panels per agent, poll-based UI that avoids proxy timeout issues
+
+**Pipeline performance (full profile, 7 blood markers, fat_loss goal):**
+
+| Agent | Collections | Duration |
+|-------|-------------|----------|
+| LabAnalysisAgent | public_health_recommendations | ~62s |
+| NutritionAgent | nutrition_guidelines + food_and_recipes | ~200s (2 LLM calls) |
+| TrainingAgent | gym_programming | ~77s |
+| GroceryAgent | food_and_recipes (per-category) | ~90s (8 LLM calls) |
+| **Total** | | **~430s** |
+
+**Key design decisions:**
+
+- **Sequential with data passing:** Lab Analysis output (dietary/training constraints, caloric target) flows into Nutrition and Training as hard constraints — not parallel, because downstream agents depend on upstream outputs
+- **Split generation for Nutrition:** 7-day JSON exceeds 2048-token output limit; split into Mon–Thu and Fri–Sun calls, merged in Python
+- **Per-category consolidation for Grocery:** One LLM call per category (Proteins, Vegetables, etc.) with fuzzy deduplication; Python pre-bucketing reduces each call to 10–20 items, avoiding truncation
+- **Async job pattern for API:** Browser POST returns `job_id` in <1s; pipeline runs server-side; browser polls every 10s — eliminates Vite proxy connection timeout problem for 7-minute requests
+- **Shared ChromaDB connection:** Orchestrator initialises one `HealthRetriever` shared across all agents — avoids 4× embedding model reload overhead
+
+**Key learnings:**
+- LLM enums must match exactly — Llama returns `"borderline-high"` not `"borderline"`; MarkerStatus enum extended to cover all observed values
+- Nutrition JSON (~13,000 chars) reliably truncates at 2048 tokens — split generation is the correct fix
+- Grocery: keyword pre-bucketing + per-category LLM consolidation handles fuzzy ingredient matching that pure Python string matching cannot
+- Vite proxy drops connections after ~2 min regardless of `timeout: 0` — async job polling is the production-correct pattern
+- Docker build context must be project root (not `services/api/`) to COPY `agents/` and `rag/` into the API container
 
 ---
 
-### 🔜 Module 5 — Agentic AI / Multi-Agent Orchestration (Next)
+### 🔜 Module 6 — Model Context Protocol (Planned)
 
-Planned: Lab Analysis Agent, Nutrition Agent, Training Agent, Grocery Agent — each scoped to a dedicated ChromaDB collection, coordinating via structured intermediate outputs through an orchestration loop.
-
----
-
-### 🔜 Module 6 — Model Context Protocol / MCP (Planned)
-
-Planned: Expose health data, workout history, and recipe database via MCP servers.
+Expose health data, workout history, and recipe database via MCP servers.
 
 ---
 
-### ✅ Frontend Dashboard (Complete — Steps 1–9)
+### ✅ Frontend Dashboard
 
-**Built:**
-
-- `services/api/` — FastAPI middleware on port 8002
-  - `POST /api/chat` — parallel RAG + base execution via `asyncio.gather()`
-  - `POST /api/search` — direct ChromaDB vector search for Knowledge Base view
-  - `GET /api/health` — downstream service liveness
-  - Grounding score: keyword overlap between RAG response and retrieved chunks
-  - ChromaDB v2 UUID caching for all collection queries
-
-- `services/frontend/` — React 18 + TypeScript + Vite + Tailwind on port 3000
-  - **Chat & Compare** — query input, side-by-side base vs RAG, scrollable sources with scores and metadata, metrics row
-  - **Analytics** — session latency trend and grounding score history via recharts
-  - **Knowledge Base** — direct ChromaDB search UI
-  - **Health Profile** — body metrics, blood markers, goal, notes — included in every query
-  - **Config** — top-k control, system info
-
-- All 4 services in `docker-compose.yml` — `make start` brings up the full stack
-- Vite proxy: `/api/*` → `http://api:8002` inside Docker
+**6 views:**
+- **Chat & Compare** — query input, side-by-side base vs RAG, sources panel, grounding metrics
+- **Orchestrate** — full 4-agent pipeline with async polling, per-agent progress cards, collapsible result panels
+- **Analytics** — session latency trend and grounding score history
+- **Knowledge Base** — direct ChromaDB vector search UI
+- **Health Profile** — body metrics, blood markers, goal, notes — used by both Chat and Orchestrate
+- **Config** — top-k parameter, system info
 
 **Remaining:**
-
-| Step | Description |
-|------|-------------|
-| 4 | SSE token streaming (future enhancement) |
-| 10 | EC2 Security Group lockdown (before demo) |
+- SSE token streaming (future enhancement)
+- EC2 Security Group lockdown before demo
 
 ---
 
 ## Design Decisions
 
+### Why sequential agents over parallel?
+
+Lab Analysis outputs `dietary_constraints` and `training_constraints` that Nutrition and Training must respect. Nutrition outputs the `weekly_plan` that Grocery aggregates. The dependency graph is linear — parallelism would require a merge/reconcile step that adds complexity without benefit on a single T4.
+
+### Why split Nutrition generation into two calls?
+
+A 7-day × 3-meal plan with ingredients, instructions, and macros consistently exceeds 2048 tokens. Splitting into Mon–Thu and Fri–Sun generates two valid JSON fragments that Python merges — simpler and more reliable than raising the token limit (which would slow generation significantly on T4).
+
+### Why per-category LLM consolidation for Grocery?
+
+Simple string matching fails on `"150g chicken breast"` vs `"chicken breast, diced, 200g"`. The LLM handles fuzzy normalisation naturally. Pre-bucketing by keyword (Python, instant) limits each LLM call to 10–20 items — well within 2048 tokens and never truncates.
+
+### Why async job polling instead of a long HTTP request?
+
+Vite's dev server proxy drops connections after ~2 minutes regardless of timeout configuration. A 7-minute pipeline request will always fail through the proxy. The async pattern (POST → job_id → poll status → fetch result) makes every individual HTTP call short, avoiding the proxy entirely as a bottleneck.
+
 ### Why Llama 3.1 8B over Mistral 7B?
 
-| Factor | Llama 3.1 8B | Mistral 7B AWQ |
-|--------|-------------|----------------|
-| Context window | 128K tokens | 4K tokens |
-| RAG suitability | ✅ Excellent | ❌ Too short for retrieved docs |
-| LoRA training | ✅ fp16 + BitsAndBytes | ❌ AWQ is inference-only |
-| Single model train + serve | ✅ Yes | ❌ Requires separate versions |
-
-### Why FastAPI + React over Streamlit or Gradio?
-
-| Factor | FastAPI + React | Streamlit / Gradio |
-|--------|----------------|-------------------|
-| Parallel RAG + base calls | ✅ Native async | ❌ Requires workarounds |
-| SSE token streaming | ✅ First-class | ⚠️ Limited |
-| Custom analytics UI | ✅ Full control | ❌ Constrained widgets |
-| Production extensibility | ✅ Yes (Module 5+) | ❌ Prototype-only |
-
-### Why a FastAPI middleware instead of the frontend calling vLLM directly?
-
-Direct browser-to-vLLM calls require exposing port 8000 publicly. The middleware enables logic that cannot run in the browser: `asyncio.gather()` parallel execution, grounding score computation, and ChromaDB UUID resolution.
-
-### Why STRUCTURED over NAIVE prompt strategy?
-
-Labelled context blocks (`[CONTEXT: Clinical Lab Reference Ranges]`) tell the model the source and authority of each retrieved chunk, producing stronger grounding than flat concatenation.
+128K context window vs 4K — essential for RAG with multiple retrieved chunks. Single model for both training (BitsAndBytes QLoRA) and inference (vLLM). AWQ-quantized models like Mistral 7B AWQ cannot be used for LoRA training.
 
 ### Why four separate ChromaDB collections?
 
-Each agent in Module 5 queries only its relevant domain. A Lab Analysis Agent should never retrieve a recipe when looking up an LDL threshold. Collection-level isolation enforces this cleanly without metadata filtering complexity.
+Collection-level isolation enforces domain separation cleanly — a Lab Analysis Agent queries only clinical guidelines, never recipes. This removes the need for metadata filtering and keeps retrieval fast and precise.
 
 ### Why CPU for embeddings?
 
-Preserves the T4's full 16 GB VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — fast enough for this workload.
-
-### Why vLLM over llama.cpp?
-
-vLLM is purpose-built for GPU servers: PagedAttention, built-in OpenAI-compatible API, first-class Docker support. llama.cpp is best for CPU or laptop environments.
-
-### Why ChromaDB over FAISS?
-
-ChromaDB runs as a persistent server with a REST API accessible from all containers. FAISS is a library embedded in application code — not suitable for a multi-service Docker architecture.
-
-### Why runtime flags in docker-compose.yml instead of the Dockerfile?
-
-The vLLM image is ~15 GB. Rebuilding on the T4's 80 GB disk exhausts space. The `command` override in `docker-compose.yml` takes effect at container start with no rebuild.
+Preserves the full 16 GB T4 VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — negligible for this workload.
 
 ---
 
@@ -846,4 +676,4 @@ The vLLM image is ~15 GB. Rebuilding on the T4's 80 GB disk exhausts space. The 
 
 ---
 
-*Last updated: Modules 1–4 complete · Frontend dashboard complete (Steps 1–9) · May 2026*
+*Last updated: Modules 1–5 complete · Frontend dashboard complete · June 2026*
