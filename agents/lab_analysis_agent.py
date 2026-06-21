@@ -152,30 +152,41 @@ class LabAnalysisAgent(BaseAgent):
         """
         tdee, recommended_calories = self._calculate_calories(profile, goals)
 
+        # Track whether real blood markers were submitted. Used both in the
+        # prompt instructions below AND as a hard post-generation guard in
+        # _parse_output(), so a hallucinated/copied example can never leak
+        # into the final output even if the LLM ignores the instruction.
+        self._has_blood_markers = bool(profile.blood_markers)
+
+        # NOTE: This is a STRUCTURE-ONLY template. Do not put realistic,
+        # clinically-specific values here (e.g. a real marker name + a
+        # plausible value + a plausible threshold) — models reliably copy
+        # vivid few-shot examples over sparse input data, which is exactly
+        # how a permanent "LDL elevated" hallucination got baked in before.
+        # Keep every field a generic placeholder.
         schema_example = {
             "analysed_markers": [
                 {
-                    "name": "LDL Cholesterol",
-                    "value": 3.8,
-                    "unit": "mmol/L",
-                    "status": "elevated",
-                    "reference_range": "Optimal: < 2.6 mmol/L",
-                    "interpretation": "LDL is borderline-high, increasing cardiovascular risk.",
-                    "dietary_implication": "Reduce saturated fat; increase soluble fibre and omega-3.",
-                    "training_implication": "Moderate-intensity cardio recommended to improve lipid profile."
+                    "name": "<marker name, copied exactly from profile.blood_markers>",
+                    "value": "<numeric value from profile.blood_markers>",
+                    "unit": "<unit from profile.blood_markers>",
+                    "status": "<normal|borderline|elevated|low — your assessment>",
+                    "reference_range": "<range from retrieved guidelines above>",
+                    "interpretation": "<1 sentence>",
+                    "dietary_implication": "<actionable bullet, or omit if not applicable>",
+                    "training_implication": "<actionable bullet, or omit if not applicable>"
                 }
             ],
             "dietary_constraints": [
-                "Limit saturated fat to < 7% of calories (elevated LDL)",
-                "Increase soluble fibre intake (oats, legumes, vegetables)"
+                "<actionable bullet point>"
             ],
             "training_constraints": [
-                "Include 150 min/week moderate-intensity cardio (elevated LDL)"
+                "<actionable bullet point>"
             ],
             "estimated_tdee": tdee,
             "recommended_calories": recommended_calories,
             "overall_health_summary": "2-3 sentence narrative summary.",
-            "sources_used": ["ABIM Lab Reference", "AHA Cardiovascular Guidelines"]
+            "sources_used": ["<source name from retrieved guidelines>"]
         }
 
         parts = [
@@ -196,17 +207,56 @@ class LabAnalysisAgent(BaseAgent):
             "- estimated_tdee and recommended_calories are pre-calculated — use these exact values:",
             f"  estimated_tdee = {tdee} kcal",
             f"  recommended_calories = {recommended_calories} kcal",
-            "- If no blood markers are provided, return an empty analysed_markers list",
-            "  and derive constraints from the medical history and goals only.",
             "- sources_used: list the source names from the retrieved guidelines you used.",
             "",
-            "Respond with ONLY valid JSON matching this exact schema:",
+        ]
+
+        if self._has_blood_markers:
+            marker_list = ", ".join(
+                f"{m.name} = {m.value} {m.unit}" for m in profile.blood_markers
+            )
+            parts += [
+                f"- This user submitted these blood markers: {marker_list}.",
+                "  Populate analysed_markers using ONLY these markers — do not invent",
+                "  additional markers that were not submitted.",
+                "",
+            ]
+        else:
+            parts += [
+                "- This user submitted NO blood markers (blood_markers is empty).",
+                "  analysed_markers MUST be an empty list [].",
+                "  Do NOT invent, assume, or estimate any blood marker values.",
+                "  Derive dietary_constraints and training_constraints from medical",
+                "  history and goals only.",
+                "",
+            ]
+
+        parts += [
+            "Respond with ONLY valid JSON matching this exact schema.",
+            "IMPORTANT: every value shown below (e.g. the marker name, numbers,",
+            "status words, the reference range text) is a PLACEHOLDER describing",
+            "the expected type/shape, NOT real data. Do not copy any of these",
+            "placeholder values into your actual answer.",
             json.dumps(schema_example, indent=2),
         ]
         return "\n".join(parts)
 
     def _parse_output(self, raw: str) -> LabAnalysisOutput:
         data = self._extract_json(raw)
+
+        # Hard guard: regardless of what the LLM returned, if the user
+        # submitted no blood markers, force an empty analysed_markers list.
+        # This makes the "no markers in → no markers out" guarantee a code
+        # invariant rather than something that depends on prompt compliance.
+        if not getattr(self, "_has_blood_markers", True):
+            if data.get("analysed_markers"):
+                logger.warning(
+                    f"[{self.AGENT_NAME}] LLM returned {len(data['analysed_markers'])} "
+                    f"analysed_markers with no blood_markers submitted — discarding "
+                    f"(likely hallucinated/copied from schema example)."
+                )
+            data["analysed_markers"] = []
+
         return LabAnalysisOutput(**data)
 
     # ── Private helpers ───────────────────────────────────────────────────────
