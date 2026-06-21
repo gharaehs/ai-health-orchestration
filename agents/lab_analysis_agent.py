@@ -13,13 +13,21 @@ Output: LabAnalysisOutput
   - Derived training_constraints for Training Agent
   - Estimated TDEE + recommended caloric target
   - Overall health summary
+
+Module 6 (MCP): retrieval is routed through the mcp-rag server instead of
+calling HealthRetriever directly — see _retrieve()/_mcp_retrieve() below.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from typing import Any
+
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 from agents.base import BaseAgent
 from agents.schemas import (
@@ -30,6 +38,8 @@ from agents.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+MCP_RAG_URL = os.environ.get("MCP_RAG_URL", "http://mcp-rag:8004/mcp")
 
 
 # ── TDEE multipliers (Mifflin-St Jeor + activity factor) ─────────────────────
@@ -77,6 +87,57 @@ class LabAnalysisAgent(BaseAgent):
             "general health biomarkers clinical reference ranges "
             "cholesterol glucose HbA1c interpretation guidelines"
         )
+
+    # ── Module 6: MCP-based retrieval override ────────────────────────────────
+
+    def _retrieve(self, profile, goals, context):
+        """
+        Override BaseAgent._retrieve — query the RAG corpus through the
+        MCP server (Module 6) instead of calling self.retriever directly.
+        Output format matches BaseAgent._retrieve exactly.
+        """
+        query = self._build_query(profile, goals, context)
+        logger.info(f"[{self.AGENT_NAME}] RAG query (via MCP): '{query[:80]}...'")
+
+        try:
+            chunks = asyncio.run(self._mcp_retrieve(query))
+        except Exception as e:
+            logger.exception(f"[{self.AGENT_NAME}] MCP retrieval error")
+            return ""
+
+        if not chunks:
+            logger.warning(f"[{self.AGENT_NAME}] No chunks retrieved via MCP")
+            return ""
+
+        lines = ["=== RETRIEVED CLINICAL/NUTRITIONAL GUIDELINES ==="]
+        for i, chunk in enumerate(chunks, 1):
+            lines.append(
+                f"\n[Source {i} | {chunk['collection']} | {chunk['source']}]\n"
+                f"{chunk['content'].strip()}"
+            )
+        lines.append("\n=== END GUIDELINES ===")
+        context_str = "\n".join(lines)
+
+        logger.info(
+            f"[{self.AGENT_NAME}] Retrieved {len(chunks)} chunks via MCP "
+            f"({len(context_str)} chars)"
+        )
+        return context_str
+
+    async def _mcp_retrieve(self, query: str) -> list[dict]:
+        async with streamablehttp_client(MCP_RAG_URL) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "retrieve_context",
+                    {
+                        "query_text": query,
+                        "query_type": self.COLLECTION_KEY,
+                        "n_results_per_collection": 6,
+                        "max_distance": 0.8,
+                    },
+                )
+                return result.structuredContent["result"]
 
     def _build_prompt(
         self,
