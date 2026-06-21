@@ -42,9 +42,11 @@ services:
     environment:
       - VLLM_URL=http://llm:8000
       - CHROMA_URL=http://vector-db:8000
+      - MCP_RAG_URL=http://mcp-rag:8004/mcp
     depends_on:
-      - llm
-      - vector-db
+        - llm
+        - vector-db
+        - mcp-rag
     restart: unless-stopped
 
   frontend:
@@ -54,3 +56,15 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+  mcp-rag:
+    build:
+      context: .
+      dockerfile: services/mcp-rag/Dockerfile
+    ports:
+      - "8004:8004"
+    depends_on:
+      - vector-db
+    environment:
+      - CHROMA_HOST=vector-db
+      - CHROMA_PORT=8000

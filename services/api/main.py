@@ -6,6 +6,11 @@ from routes.chat import router as chat_router
 from routes.search import router as search_router
 from routes.orchestrate import router as orchestrate_router
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
+
+
 app = FastAPI(title="Health AI Orchestration API", version="0.4.0")
 
 app.add_middleware(

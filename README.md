@@ -39,7 +39,7 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 | Module 3 | Vector Database & RAG Corpus Ingestion | ✅ Complete |
 | Module 4 | Retrieval-Augmented Generation (RAG) | ✅ Complete |
 | Module 5 | Agentic AI / Multi-Agent Orchestration | ✅ Complete |
-| Module 6 | Model Context Protocol (MCP) | 🔜 Planned |
+| Module 6 | Model Context Protocol (MCP) | 🔄 In Progress |
 | Frontend | Analytics Dashboard & Orchestration UI | ✅ Complete |
 
 **Core capabilities:**
@@ -68,17 +68,24 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 │  │  GPU: Tesla T4       │    │  - nutrition_guidelines       │   │
 │  └──────────┬───────────┘    │  - gym_programming            │   │
 │             │                │  - food_and_recipes           │   │
-│             ▼                └──────────────────────────────┘   │
-│  ┌──────────────────────┐    ┌──────────────────────────────┐   │
-│  │   FastAPI Container  │    │   React/Vite Container        │   │
-│  │   Port: 8002         │    │   Port: 3000                  │   │
-│  │                      │    │                               │   │
-│  │  RAG pipeline        │    │  Chat & Compare               │   │
-│  │  Multi-agent orch.   │    │  Orchestrate (Module 5)       │   │
-│  │  Async job system    │    │  Analytics charts             │   │
-│  │  ChromaDB retrieval  │    │  Knowledge Base search        │   │
-│  └──────────────────────┘    │  Health Profile form          │   │
-│                              └──────────────────────────────┘   │
+│             ▼                └──────────────┬───────────────┘   │
+│  ┌──────────────────────┐                   │ (direct, 3 agents)│
+│  │   FastAPI Container  │                   │                   │
+│  │   Port: 8002         │                   ▼                   │
+│  │                      │    ┌──────────────────────────────┐   │
+│  │  RAG pipeline        │    │   MCP RAG Server (Module 6)   │   │
+│  │  Multi-agent orch.   │◄──►│   Port: 8004                  │   │
+│  │  Async job system    │MCP │   Wraps HealthRetriever        │   │
+│  │  ChromaDB (3 agents) │    │   4 named tools + retrieve_    │   │
+│  │  MCP client (Nutri.) │    │   context (collection-routed)  │   │
+│  └──────────────────────┘    └──────────────────────────────┘   │
+│             │                                                    │
+│             ▼                                                    │
+│  ┌──────────────────────┐                                       │
+│  │   React/Vite Container│                                      │
+│  │   Port: 3000          │                                      │
+│  └──────────────────────┘                                       │
+│                                                                  │
 │    ./models/llama/       (mounted volume, not in git)           │
 │    ./models/adapters/    (LoRA adapters, not in git)            │
 │    ./data/chroma/        (mounted volume, persisted to disk)    │
@@ -99,7 +106,7 @@ Orchestrator
     │       interprets blood markers against clinical reference ranges
     │       outputs: dietary_constraints, training_constraints, TDEE, target_calories
     │
-    ├── 2. NutritionAgent    → nutrition_guidelines + food_and_recipes
+    ├── 2. NutritionAgent    → nutrition_guidelines + food_and_recipes (via MCP server, Module 6)
     │       generates 7-day meal plan (split: Mon–Thu + Fri–Sun)
     │       consumes: dietary_constraints, recommended_calories from Lab Analysis
     │
@@ -125,6 +132,23 @@ HealthRAGPipeline (rag/pipeline.py)
     ├── 2. Retrieve → ChromaDB (port 8001) — collection routed by query type
     ├── 3. Build augmented prompt → STRUCTURED strategy (labelled context blocks)
     └── 4. Generate → vLLM API (port 8000) → Structured JSON response
+```
+
+**MCP retrieval path (Module 6, NutritionAgent only):**
+
+```
+NutritionAgent._retrieve()  (override of BaseAgent._retrieve)
+    │
+    ▼
+MCP Client (streamable HTTP) ──► MCP RAG Server (port 8004)
+    │                                  │
+    │                                  ▼
+    │                          HealthRetriever.retrieve()
+    │                                  │
+    │                                  ▼
+    │                            ChromaDB (port 8001)
+    ◄──────────────────────────────────┘
+result.structuredContent["result"]  →  formatted context block
 ```
 
 ---
@@ -159,7 +183,7 @@ HealthRAGPipeline (rag/pipeline.py)
 ```
 ai-health-orchestration/
 │
-├── docker-compose.yml              # Orchestrates all 4 services
+├── docker-compose.yml              # Orchestrates all 5 services
 ├── Makefile                        # Command interface (start, stop, test, etc.)
 ├── .gitignore
 ├── README.md
@@ -170,13 +194,16 @@ ai-health-orchestration/
 │   ├── base.py                     # Abstract BaseAgent: RAG, LLM, retry, JSON parsing
 │   ├── orchestrator.py             # Pipeline coordinator — sequential execution
 │   ├── lab_analysis_agent.py       # Agent 1: blood marker interpretation
-│   ├── nutrition_agent.py          # Agent 2: 7-day meal plan (split generation)
+│   ├── nutrition_agent.py          # Agent 2: 7-day meal plan — RAG via MCP (Module 6)
 │   ├── training_agent.py           # Agent 3: weekly gym program
 │   └── grocery_agent.py            # Agent 4: per-category shopping list
 │
 ├── services/
 │   ├── llm/
 │   │   └── Dockerfile              # vLLM container configuration
+│   ├── mcp-rag/                    # ✅ Module 6: MCP server wrapping RAG corpus
+│   │   ├── Dockerfile              # CPU-only torch — no GPU needed for embeddings
+│   │   └── mcp_server.py           # FastMCP server: 4 named tools + retrieve_context
 │   ├── api/                        # ✅ FastAPI middleware
 │   │   ├── Dockerfile              # Copies agents/ and rag/ from project root
 │   │   ├── main.py                 # FastAPI app — registers all routers
@@ -250,6 +277,22 @@ ai-health-orchestration/
 - **Port:** `8001` (host) → `8000` (internal)
 - **Storage:** `./data/chroma:/data`
 - **Collections:** 4 domain-specific collections (13,349 documents)
+
+### MCP Server — RAG Corpus (Module 6)
+
+- **Image:** custom, built from `services/mcp-rag/Dockerfile`
+- **Port:** `8004`
+- **Transport:** Streamable HTTP (`http://mcp-rag:8004/mcp` on the internal Docker network)
+- **Wraps:** `rag/retriever.py`'s `HealthRetriever` — no duplicated retrieval logic, same embedding model and ChromaDB connection pattern as the direct path
+- **Tools exposed:**
+  - `retrieve_context(query_text, query_type, n_results_per_collection, max_distance)` — mirrors `HealthRetriever.retrieve()`'s collection routing exactly; this is what `NutritionAgent` calls
+  - `search_nutrition_guidelines(query, top_k)`
+  - `search_food_and_recipes(query, top_k)`
+  - `search_gym_programming(query, top_k)`
+  - `search_public_health_recommendations(query, top_k)`
+  - `corpus_health_check()` — returns document counts per collection, for debugging
+- **Consumer:** `NutritionAgent` only (scoped deliberately — see [Design Decisions](#design-decisions)). `LabAnalysisAgent`, `TrainingAgent`, and `GroceryAgent` still call `HealthRetriever` directly via `BaseAgent._retrieve()`.
+- **Dependency note:** uses CPU-only torch (`--index-url https://download.pytorch.org/whl/cpu`) since this container has no GPU reservation and only runs `sentence-transformers` embeddings on CPU — avoids ~2.5 GB of unused CUDA libraries that would otherwise be pulled in by the default GPU torch wheel.
 
 ### API Middleware — FastAPI
 
@@ -330,6 +373,7 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 5. **Git**
 6. **Python 3.12 + python3.12-venv**
 7. **HuggingFace account** with Meta Llama 3.1 license accepted
+8. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
 
 ---
 
@@ -427,12 +471,20 @@ python3 scripts/ingest.py
 ## Running the System
 
 ```bash
-make start    # Build and start all 4 services
+make start    # Build and start all services
 make logs     # Watch startup logs
 make stop     # Stop all services
 ```
 
 Access: `http://<your-ec2-public-ip>:3000`
+
+**MCP server standalone test** (before wiring into agents, or for debugging):
+```bash
+docker compose up -d mcp-rag
+npx @modelcontextprotocol/inspector
+# Connect: Transport Type = Streamable HTTP, URL = http://<ec2-ip>:8004/mcp
+# Test corpus_health_check first, then retrieve_context with a real query_type
+```
 
 ---
 
@@ -473,13 +525,23 @@ curl -s http://localhost:8002/api/orchestrate/status/$JOB | python3 -m json.tool
 curl -s http://localhost:8002/api/orchestrate/result/$JOB | python3 -m json.tool | head -40
 ```
 
+### Verifying MCP retrieval is actually being used (not silently falling back)
+
+Compare `prompt_len` in the api logs for NutritionAgent's first LLM call:
+- **~19,000+ chars** → MCP retrieval succeeded and context was injected
+- **~1,700–1,800 chars** → MCP retrieval failed and `_retrieve()` silently fell back to `""` (check for `[NutritionAgent] MCP retrieval error` in logs)
+
+```bash
+docker compose logs api | grep -i "nutritionagent\|mcp"
+```
+
 ---
 
 ## Makefile Reference
 
 | Command | Description |
 |---------|-------------|
-| `make start` | Build and start all 4 services |
+| `make start` | Build and start all services |
 | `make stop` | Stop and remove all containers |
 | `make logs` | Follow live logs |
 | `make download-model` | Download Llama 3.1 8B |
@@ -497,6 +559,8 @@ curl -s http://localhost:8002/api/orchestrate/result/$JOB | python3 -m json.tool
 | LoRA adapter | ❌ No | Re-train or `scp` |
 | Vector DB data | ❌ No | `scp ./data/chroma/` or re-run `ingest.py` |
 | Corpus files | ❌ No | `scp ./data/corpus/` |
+
+**Note:** the EC2 instance's public IP changes on stop/start unless an Elastic IP is attached. If services become unreachable after a restart, check the current IP first (`curl -s http://169.254.169.254/latest/meta-data/public-ipv4`) before debugging anything else.
 
 ---
 
@@ -519,12 +583,26 @@ The async job pattern (POST → poll status → fetch result) avoids proxy timeo
 docker builder prune -af
 rm -rf ~/.cache/pip ~/.cache/JetBrains
 ```
+If the failing step is installing `torch`, check whether the container actually needs GPU support. CPU-only containers (e.g. `mcp-rag`) should install torch via `--index-url https://download.pytorch.org/whl/cpu` — the default GPU wheel pulls in ~2.5 GB of unused `nvidia-cuda-*` packages.
 
 ### vLLM uses FlashInfer instead of FlashAttention2
 Not an error. T4 (compute 7.5) does not support FlashAttention2 (requires 8.0+).
 
 ### ChromaDB v2 UUID error
 Already handled — `comparator.py` caches name→UUID mapping. Restart api container to clear cache.
+
+### Module 6: agent's `_retrieve()` override not taking effect
+If logs show `agents.base` logging the RAG query instead of `agents.nutrition_agent`, the override method isn't actually present in the subclass (commonly: it accidentally ended up in `agents/base.py` instead of `agents/nutrition_agent.py`, or was added at module level instead of inside the class body). Python resolves `self._retrieve()` via the instance's actual class — if the subclass doesn't define it, the inherited `BaseAgent` version silently runs instead with no error.
+
+### Module 6: MCP tool result parsing — `KeyError` or `TypeError: string indices must be integers`
+A tool returning `list[dict]` is exposed via `result.structuredContent`, wrapped as `{"result": [...]}` — **not** via `result.content[0].text`, which behaves differently depending on SDK version. Use:
+```python
+result = await session.call_tool("retrieve_context", {...})
+return result.structuredContent["result"]
+```
+
+### Module 6: `asyncio.run()` inside a sync agent method
+Safe in this architecture specifically because `Orchestrator.run()` and `_run_agent()` are fully synchronous with no `async`/`await` anywhere — the background thread running the pipeline never has its own event loop already running. If you ever make the Orchestrator itself async, this would need to change to `await` directly instead.
 
 ---
 
@@ -612,9 +690,32 @@ Already handled — `comparator.py` caches name→UUID mapping. Restart api cont
 
 ---
 
-### 🔜 Module 6 — Model Context Protocol (Planned)
+### 🔄 Module 6 — Model Context Protocol (In Progress)
 
-Expose health data, workout history, and recipe database via MCP servers.
+**Goal:** expose health data, workout history, and the recipe database via MCP servers, and convert at least one agent's retrieval path to use the protocol instead of direct Python calls — demonstrating MCP's interoperability story without over-engineering a system that already works end-to-end.
+
+**Completed: RAG corpus exposed as an MCP server, consumed by NutritionAgent**
+
+- `services/mcp-rag/mcp_server.py` — `FastMCP` server wrapping the existing `rag/retriever.py` `HealthRetriever` with zero duplicated logic. Exposes 5 tools: `retrieve_context` (mirrors `HealthRetriever.retrieve()`'s collection routing exactly — the one agents actually use) plus 4 collection-specific `search_*` tools for finer-grained/external use, and `corpus_health_check` for debugging
+- Runs as its own container (`mcp-rag`, port 8004) on Streamable HTTP transport, verified standalone via the MCP Inspector before any agent code was touched
+- `agents/nutrition_agent.py` — `_retrieve()` overridden (subclass-only, not touching `BaseAgent`) to call the MCP server via `mcp.client.session.ClientSession` + `streamablehttp_client` instead of calling `HealthRetriever` directly; output format matches the original exactly, so all downstream prompt-building code is unchanged
+- Verified end-to-end in production: full pipeline run confirmed via log evidence (`prompt_len` for NutritionAgent's first call back to ~19,100 chars, matching the pre-MCP grounded baseline, vs. ~1,800 chars during the silent-fallback failure runs) plus direct MCP session logs showing the full JSON-RPC lifecycle (initialize → negotiate protocol `2025-06-18` → tool call → session delete)
+
+**Scoping decision:** only `NutritionAgent`'s retrieval was converted. `LabAnalysisAgent`, `TrainingAgent`, and `GroceryAgent` still call `HealthRetriever` directly via `BaseAgent._retrieve()`. This is deliberate — see [Design Decisions](#design-decisions).
+
+**Still open / planned:**
+- Calendar integration MCP server (push generated meal plans and gym programs to Google Calendar) — highest priority next piece, since it's a genuine third-party boundary where MCP's value is clearest
+- EC2 Security Group lockdown before any demo (currently several ports including 8004 are open to `0.0.0.0/0`)
+- Optional: exposing the `mcp-rag` server to external MCP clients (e.g. Claude Desktop via a custom connector) — would require a public HTTPS endpoint with a real domain/TLS cert, since custom connectors are reached from the client's cloud infrastructure rather than directly from the local network; not pursued since it's orthogonal to the module's core grading criteria
+
+**Key learnings:**
+- **MCP earns its place only at genuine external boundaries.** Wrapping agent-to-orchestrator calls in MCP (same codebase, same trust boundary) would add network overhead and operational complexity for zero new flexibility — that decoupling already exists via the `BaseAgent` abstract-class pattern. MCP's value is specifically standardizing the wire format between parties that *don't* share a codebase (a RAG corpus as a reusable service, a third-party calendar API, an external AI client) — not a substitute for normal OOP polymorphism within one's own app.
+- **Build context vs. Dockerfile location mismatch.** With `docker-compose.yml`'s build `context: .` (repo root), `COPY` paths in a Dockerfile under `services/mcp-rag/Dockerfile` must still be written relative to the repo root, not relative to the Dockerfile's own directory — caused an early build failure (`requirements.txt: not found`) until corrected.
+- **CPU-only torch avoids multi-GB of wasted disk.** `torch==2.5.1` with no index qualifier installs the full CUDA build (~2.5 GB of `nvidia-cuda-*` wheels) even in containers with no GPU reservation. Installing via `--index-url https://download.pytorch.org/whl/cpu` first, then the rest of `requirements.txt` with torch filtered out, fixed repeated `No space left on device` build failures — with zero effect on embedding model accuracy, since the computation was always CPU-bound regardless of which torch build was installed.
+- **MCP tool results: `structuredContent`, not `content[0].text`.** A tool returning `list[dict]` is exposed via `result.structuredContent`, wrapped as `{"result": [...]}`. Assuming the unstructured `content[0].text` field held the same shape produced two different wrong guesses (a `TypeError` from iterating dict keys, then a `KeyError` from the wrong field) before checking the actual attribute.
+- **A broken `BaseAgent` takes down the entire app, not just one agent.** Pasting new code into the wrong file (`agents/base.py` instead of `agents/nutrition_agent.py`) caused an `IndentationError` that every agent's import chain depends on — manifesting as a full container crash and HTTP 502 on the frontend, several layers away from the actual mistake.
+- **Silent fallback paths hide failures convincingly.** `_retrieve()`'s `try/except` returning `""` on any error meant the pipeline kept reporting `4/4 agents succeeded` even on a run where MCP retrieval silently failed — the only tell was a sharp drop in `prompt_len` for that agent's LLM call. Worth comparing against a known-good baseline number whenever a fallback path exists.
+- **Default Python logging silently drops `INFO` messages with no handler configured.** None of `BaseAgent`'s, `Orchestrator`'s, or any agent's `logger.info()` calls were visible in `docker compose logs api` until `logging.basicConfig(level=logging.INFO)` was added to the app entrypoint — a pre-existing gap, unrelated to Module 6, that had been hiding all agent-level logging the whole time.
 
 ---
 
@@ -664,6 +765,14 @@ Collection-level isolation enforces domain separation cleanly — a Lab Analysis
 
 Preserves the full 16 GB T4 VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — negligible for this workload.
 
+### Why expose the RAG corpus as an MCP server, but not the agents themselves?
+
+The RAG corpus is conceptually a reusable knowledge service — exposing it via MCP means any future MCP-compliant consumer (not just this Orchestrator) could query it without custom integration code, and it cleanly demonstrates the protocol's interoperability promise. Agents calling each other within the same codebase don't have that problem: `BaseAgent`'s abstract-class pattern already gives full polymorphism and swappability in-process, for free, with no network hop. Converting agent-to-agent or agent-to-orchestrator calls to MCP would add latency and operational surface (separate containers, network failure handling) without buying any new flexibility — exactly the kind of over-engineering this project avoids elsewhere.
+
+### Why scope the MCP conversion to NutritionAgent only?
+
+`BaseAgent._retrieve()` is shared by all four agents. Editing it directly would convert every agent to MCP at once — more than needed to demonstrate the architecture, and a bigger blast radius for Module 6's actual grading criteria. Overriding `_retrieve()` specifically inside `NutritionAgent` (rather than modifying the shared base class) proves the pattern works end-to-end while leaving `LabAnalysisAgent`, `TrainingAgent`, and `GroceryAgent` — and the well-tested `BaseAgent` they share — completely untouched.
+
 ---
 
 ## Links
@@ -673,7 +782,8 @@ Preserves the full 16 GB T4 VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on 
 - **Model:** https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
 - **vLLM Documentation:** https://docs.vllm.ai
 - **ChromaDB Documentation:** https://docs.trychroma.com
+- **Model Context Protocol:** https://modelcontextprotocol.io
 
 ---
 
-*Last updated: Modules 1–5 complete · Frontend dashboard complete · June 2026*
+*Last updated: Modules 1–5 complete · Module 6 in progress (RAG-via-MCP for NutritionAgent verified end-to-end; calendar integration planned) · Frontend dashboard complete · June 2026*
