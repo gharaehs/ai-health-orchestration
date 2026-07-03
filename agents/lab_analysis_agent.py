@@ -173,8 +173,8 @@ class LabAnalysisAgent(BaseAgent):
                     "status": "<normal|borderline|elevated|low — your assessment>",
                     "reference_range": "<range from retrieved guidelines above>",
                     "interpretation": "<1 sentence>",
-                    "dietary_implication": "<actionable bullet, or omit if not applicable>",
-                    "training_implication": "<actionable bullet, or omit if not applicable>"
+                    "dietary_implication": "<single sentence string, or omit if not applicable>",
+                    "training_implication": "<single sentence string, or omit if not applicable>"
                 }
             ],
             "dietary_constraints": [
@@ -257,6 +257,11 @@ class LabAnalysisAgent(BaseAgent):
                 )
             data["analysed_markers"] = []
 
+        # Flatten any list fields the LLM emitted as arrays instead of strings
+        for marker in data.get("analysed_markers", []):
+            for field in ("dietary_implication", "training_implication", "interpretation"):
+                if isinstance(marker.get(field), list):
+                    marker[field] = " ".join(marker[field])
         return LabAnalysisOutput(**data)
 
     # ── Private helpers ───────────────────────────────────────────────────────

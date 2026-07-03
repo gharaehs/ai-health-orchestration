@@ -47,6 +47,7 @@ class FitnessLevel(str, Enum):
 
 class MarkerStatus(str, Enum):
     OPTIMAL             = "optimal"
+    NORMAL              = "normal"
     BORDERLINE          = "borderline"
     BORDERLINE_HIGH     = "borderline-high"
     BORDERLINE_LOW      = "borderline-low"
