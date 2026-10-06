@@ -1,4 +1,5 @@
-VLLM_URL = "http://llm:8000"
-CHROMA_URL = "http://vector-db:8000"
-VLLM_MODEL = "/models/llama"
-REQUEST_TIMEOUT = 600
+import os
+
+# LLM settings (LLM_PROVIDER, BEDROCK_MODEL_ID, AWS_REGION, VLLM_URL, VLLM_MODEL,
+# LLM_TIMEOUT) are read by agents/llm_client.py.
+CHROMA_URL = os.environ.get("CHROMA_URL", "http://vector-db:8000")

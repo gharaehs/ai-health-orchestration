@@ -235,9 +235,16 @@ def main():
         help="Show retrieved chunk previews",
     )
     parser.add_argument(
+        "--provider",
+        choices=["bedrock", "vllm"],
+        default=None,
+        help="LLM provider (default: $LLM_PROVIDER or bedrock)",
+    )
+    parser.add_argument(
         "--vllm-url",
-        default="http://localhost:8000",
-        help="vLLM API base URL (default: http://localhost:8000)",
+        default=None,
+        help="vLLM API base URL, only used with --provider vllm "
+             "(default: $VLLM_URL or http://localhost:8000)",
     )
     parser.add_argument(
         "--chroma-host",
@@ -250,6 +257,7 @@ def main():
     # Initialise pipeline
     print("Initialising RAG pipeline...")
     pipeline = HealthRAGPipeline(
+        provider=args.provider,
         vllm_url=args.vllm_url,
         chroma_host=args.chroma_host,
         strategy=PromptStrategy.STRUCTURED,

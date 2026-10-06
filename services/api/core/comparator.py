@@ -2,7 +2,8 @@ import asyncio
 import time
 import httpx
 from sentence_transformers import SentenceTransformer
-from core.config import VLLM_URL, CHROMA_URL, VLLM_MODEL, REQUEST_TIMEOUT
+from agents import llm_client
+from core.config import CHROMA_URL
 from core.metrics import compute_grounding_score, count_tokens_approx
 
 _embedder = None
@@ -82,28 +83,23 @@ async def retrieve_chunks(query: str, collections: list[str],
     return chunks
 
 
-async def call_vllm(messages: list[dict], label: str) -> dict:
+async def call_llm(messages: list[dict], label: str) -> dict:
     start = time.perf_counter()
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    user   = "\n\n".join(m["content"] for m in messages if m["role"] != "system")
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            r = await client.post(f"{VLLM_URL}/v1/chat/completions", json={
-                "model":       VLLM_MODEL,
-                "messages":    messages,
-                "max_tokens":  1024,
-                "temperature": 0.3,
-            })
-            data    = r.json()
-            content = data["choices"][0]["message"]["content"]
-            usage   = data.get("usage", {})
-            return {
-                "content":           content,
-                "latency_s":         round(time.perf_counter() - start, 2),
-                "prompt_tokens":     usage.get("prompt_tokens",
-                                               count_tokens_approx(str(messages))),
-                "completion_tokens": usage.get("completion_tokens",
-                                               count_tokens_approx(content)),
-                "error": None,
-            }
+        result = await llm_client.acomplete(
+            system=system, user=user, max_tokens=1024, temperature=0.3,
+        )
+        return {
+            "content":           result.text,
+            "latency_s":         result.latency_s,
+            "prompt_tokens":     result.input_tokens
+                                 or count_tokens_approx(str(messages)),
+            "completion_tokens": result.output_tokens
+                                 or count_tokens_approx(result.text),
+            "error": None,
+        }
     except Exception as e:
         return {
             "content": "", "latency_s": round(time.perf_counter() - start, 2),
@@ -130,7 +126,7 @@ async def run_comparison(query: str, health_profile: dict,
 
     chunks, base_result = await asyncio.gather(
         retrieve_chunks(query, collections, top_k),
-        call_vllm(base_messages, "base"),
+        call_llm(base_messages, "base"),
     )
     retrieval_latency = round(time.perf_counter() - retrieval_start, 2)
 
@@ -154,7 +150,7 @@ async def run_comparison(query: str, health_profile: dict,
         )},
     ]
 
-    rag_result = await call_vllm(rag_messages, "rag")
+    rag_result = await call_llm(rag_messages, "rag")
     grounding  = compute_grounding_score(rag_result["content"], chunks)
     base_score = compute_grounding_score(base_result["content"], chunks)
 

@@ -1,5 +1,9 @@
 services:
+  # Optional local vLLM backend (GPU host only). Enable with:
+  #   LLM_PROVIDER=vllm docker compose --profile vllm up -d
+  # Requires Llama weights placed manually in ./models/llama.
   llm:
+    profiles: ["vllm"]
     build: ./services/llm
     image: ai-health-orchestration-llm
     command: [
@@ -40,11 +44,18 @@ services:
     ports:
       - "8002:8002"
     environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-bedrock}
+      - AWS_REGION=${AWS_REGION:-}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-}
+      # Optional pass-through for local testing; on EC2 the instance role is used
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
       - VLLM_URL=http://llm:8000
+      - VLLM_MODEL=/models/llama
       - CHROMA_URL=http://vector-db:8000
       - MCP_RAG_URL=http://mcp-rag:8004/mcp
     depends_on:
-        - llm
         - vector-db
         - mcp-rag
     restart: unless-stopped

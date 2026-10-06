@@ -42,3 +42,19 @@ export interface HealthProfile {
   goal: string
   notes: string
 }
+
+export interface ServiceHealth {
+  status: 'ok' | 'error'
+  detail?: string
+  provider?: string
+  model?: string
+  collections?: number
+}
+
+export interface HealthStatus {
+  status: 'ok' | 'degraded'
+  services: {
+    llm?: ServiceHealth
+    chromadb?: ServiceHealth
+  }
+}

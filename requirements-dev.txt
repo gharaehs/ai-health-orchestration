@@ -1,0 +1,5 @@
+# Unit tests: pip install -r requirements-dev.txt && pytest
+boto3>=1.43
+httpx>=0.27
+pydantic>=2.9
+pytest

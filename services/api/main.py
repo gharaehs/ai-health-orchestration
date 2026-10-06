@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import httpx
-from core.config import VLLM_URL, CHROMA_URL
+from agents import llm_client
+from core.config import CHROMA_URL
 from routes.chat import router as chat_router
 from routes.search import router as search_router
 from routes.orchestrate import router as orchestrate_router
@@ -28,14 +30,7 @@ app.include_router(orchestrate_router, prefix="/api")
 @app.get("/api/health")
 async def health():
     status = {}
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{VLLM_URL}/v1/models")
-            models = r.json()
-            model_id = models["data"][0]["id"] if models.get("data") else "unknown"
-        status["vllm"] = {"status": "ok", "model": model_id}
-    except Exception as e:
-        status["vllm"] = {"status": "error", "detail": str(e)}
+    status["llm"] = await asyncio.to_thread(llm_client.health)
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get(f"{CHROMA_URL}/api/v2/heartbeat")

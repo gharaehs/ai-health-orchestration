@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useChat } from './useChat'
-import { HealthProfile, Source } from './types'
+import { HealthProfile, HealthStatus, Source } from './types'
 import {
   MessageSquare, BarChart2, Database, User, Settings,
   Send, ChevronDown, ChevronUp, Zap, BookOpen, Activity
@@ -118,7 +118,32 @@ export default function App() {
   const [orchError, setOrchError] = useState<string | null>(null)
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
 
+  const [health, setHealth] = useState<HealthStatus | null>(null)
+  const [apiUp, setApiUp] = useState<boolean | null>(null)
+
   const { result, loading, error, sendQuery } = useChat()
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadHealth() {
+      try {
+        const res = await fetch('/api/health')
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data: HealthStatus = await res.json()
+        if (!cancelled) { setHealth(data); setApiUp(true) }
+      } catch {
+        if (!cancelled) { setHealth(null); setApiUp(false) }
+      }
+    }
+    loadHealth()
+    const id = setInterval(loadHealth, 30000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
+
+  const llm = health?.services.llm
+  const chroma = health?.services.chromadb
+  const llmProvider = llm?.provider ?? 'unknown'
+  const llmModel = llm?.model ?? 'unknown'
 
   async function handleSend() {
     if (!query.trim() || loading) return
@@ -232,9 +257,9 @@ export default function App() {
             ))}
           </nav>
           <div className="p-3 border-t border-gray-800 space-y-1.5">
-            <StatusDot label="vLLM :8000" />
-            <StatusDot label="ChromaDB :8001" />
-            <StatusDot label="API :8002" />
+            <StatusDot label={`LLM: ${llmProvider}`} status={llm?.status} title={llm?.detail} />
+            <StatusDot label="ChromaDB :8001" status={chroma?.status} title={chroma?.detail} />
+            <StatusDot label="API :8002" status={apiUp === null ? undefined : apiUp ? 'ok' : 'error'} />
           </div>
         </div>
 
@@ -245,8 +270,8 @@ export default function App() {
             {navItems.find(n => n.id === view)?.label}
           </span>
             <div className="flex items-center gap-2">
-              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">Llama 3.1 8B</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900 text-purple-300">LoRA: health-v1</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">{llmModel}</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900 text-purple-300">{llmProvider}</span>
             </div>
           </div>
 
@@ -369,7 +394,7 @@ export default function App() {
                         <div className="text-sm font-medium text-white mb-1">Multi-Agent Pipeline</div>
                         <div className="text-xs text-gray-500">
                           Runs 4 agents sequentially: Lab Analysis → Nutrition → Training → Grocery.
-                          Uses health profile from the Profile tab. Takes ~7 min on T4.
+                          Uses health profile from the Profile tab. Takes several minutes.
                         </div>
                       </div>
                       <button
@@ -740,13 +765,11 @@ export default function App() {
                   </div>
                   <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-2">
                     <div className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-3">System info</div>
-                    <InfoRow label="Model" value="meta-llama/Meta-Llama-3.1-8B-Instruct" />
-                    <InfoRow label="Quantization" value="BitsAndBytes 4-bit (NF4)" />
-                    <InfoRow label="Context window" value="16,384 tokens" />
-                    <InfoRow label="LoRA adapter" value="health-v1 (rank=16, alpha=32)" />
+                    <InfoRow label="LLM provider" value={llmProvider} />
+                    <InfoRow label="Model" value={llmModel} />
+                    <InfoRow label="LLM status" value={llm ? (llm.status === 'ok' ? 'ok' : `error — ${llm.detail ?? 'unknown'}`) : 'unknown'} />
                     <InfoRow label="Embedding model" value="all-MiniLM-L6-v2 (CPU)" />
-                    <InfoRow label="Vector DB" value="ChromaDB 1.5.8 — 13,349 docs" />
-                    <InfoRow label="GPU" value="NVIDIA Tesla T4 — 16 GB VRAM" />
+                    <InfoRow label="Vector DB" value={`ChromaDB 1.5.8 — ${chroma?.collections ?? '?'} collections`} />
                   </div>
                 </div>
             )}
@@ -785,10 +808,11 @@ function AgentPanel({ title, icon, expanded, onToggle, summary, children }: {
   )
 }
 
-function StatusDot({ label }: { label: string }) {
+function StatusDot({ label, status, title }: { label: string; status?: 'ok' | 'error'; title?: string }) {
+  const color = status === 'ok' ? 'bg-green-500' : status === 'error' ? 'bg-red-500' : 'bg-gray-600'
   return (
-      <div className="flex items-center gap-1.5 text-xs text-gray-500">
-        <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+      <div className="flex items-center gap-1.5 text-xs text-gray-500" title={title}>
+        <span className={`w-1.5 h-1.5 rounded-full ${color} flex-shrink-0`} />
         {label}
       </div>
   )

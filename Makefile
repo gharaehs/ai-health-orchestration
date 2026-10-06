@@ -1,27 +1,28 @@
-.PHONY: help start stop logs download-model test-llm
+.PHONY: help start start-vllm stop logs test-llm test
 
 help:
 	@echo "Available commands:"
-	@echo "  make download-model  - Download Mistral 7B AWQ"
-	@echo "  make start           - Start all services"
+	@echo "  make start           - Start all services (LLM via Bedrock by default)"
+	@echo "  make start-vllm      - Start all services with the local vLLM backend (GPU, weights in models/llama)"
 	@echo "  make stop            - Stop all services"
 	@echo "  make logs            - Follow logs"
-	@echo "  make test-llm        - Send a test prompt to the LLM"
-
-download-model:
-	bash scripts/download_model.sh
+	@echo "  make test-llm        - Send a test prompt through the configured LLM provider"
+	@echo "  make test            - Run unit tests"
 
 start:
 	docker compose up -d
 
+start-vllm:
+	LLM_PROVIDER=vllm docker compose --profile vllm up -d
+
 stop:
-	docker compose down
+	docker compose --profile vllm down
 
 logs:
 	docker compose logs -f
 
 test-llm:
-	curl -s http://localhost:8000/v1/chat/completions \
-	  -H "Content-Type: application/json" \
-	  -d '{"model": "/models/llama", "messages": [{"role": "user", "content": "Say hello!"}], "max_tokens": 50}' \
-	  | python3 -m json.tool
+	docker compose exec api python -m agents.llm_client "Say hello!"
+
+test:
+	python -m pytest -q

@@ -31,7 +31,7 @@ from agents.schemas import (
     UserGoals,
     OrchestrationResult,
 )
-from core.config import VLLM_URL, CHROMA_URL
+from core.config import CHROMA_URL
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -62,9 +62,6 @@ def _get_chroma_host_port() -> tuple[str, int]:
 
 
 _chroma_host, _chroma_port = _get_chroma_host_port()
-
-import agents.base as _agent_base
-_agent_base.VLLM_URL = f"{VLLM_URL}/v1/chat/completions"
 
 _orchestrator: Optional[Orchestrator] = None
 

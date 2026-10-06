@@ -16,7 +16,7 @@ Built as part of the **AI Technical Deep Dive** mentorship program.
 - [Frontend Dashboard](#frontend-dashboard)
 - [Prerequisites](#prerequisites)
 - [Fresh Server Setup Guide](#fresh-server-setup-guide)
-- [Model Download](#model-download)
+- [LLM Provider Configuration](#llm-provider-configuration)
 - [RAG Corpus Ingestion](#rag-corpus-ingestion)
 - [Running the System](#running-the-system)
 - [Testing & Verification](#testing--verification)
@@ -41,6 +41,11 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 | Module 5 | Agentic AI / Multi-Agent Orchestration | ✅ Complete |
 | Module 6 | Model Context Protocol (MCP) | ✅ Complete |
 | Frontend | Analytics Dashboard & Orchestration UI | ✅ Complete |
+| Migration | AWS company account — CPU EC2 + Claude Opus 5.5 via Bedrock | 🚧 In progress ([runbook](docs/aws-runbook.md)) |
+
+> **Current LLM:** generation runs on **Claude Opus 5.5 via Amazon Bedrock** (Converse API, IAM role auth) by default.
+> The original local vLLM + Llama 3.1 8B path is still available behind `LLM_PROVIDER=vllm` and the `vllm` Compose profile.
+> The architecture/hardware sections below describe the original GPU deployment (Modules 1–6).
 
 **Core capabilities:**
 - Ingest structured health data (scale metrics, blood tests, medical history)
@@ -131,7 +136,7 @@ HealthRAGPipeline (rag/pipeline.py)
     ├── 1. Embed query → sentence-transformers/all-MiniLM-L6-v2 (CPU)
     ├── 2. Retrieve → ChromaDB (port 8001) — collection routed by query type
     ├── 3. Build augmented prompt → STRUCTURED strategy (labelled context blocks)
-    └── 4. Generate → vLLM API (port 8000) → Structured JSON response
+    └── 4. Generate → agents/llm_client.py (Bedrock Converse or vLLM) → Structured JSON response
 ```
 
 **MCP retrieval path (Module 6 — all three retrieval-using agents):**
@@ -194,6 +199,7 @@ ai-health-orchestration/
 │   ├── __init__.py
 │   ├── schemas.py                  # Pydantic I/O contracts for all agents
 │   ├── base.py                     # Abstract BaseAgent: RAG, LLM, retry, JSON parsing
+│   ├── llm_client.py               # Shared LLM client: Bedrock Converse / vLLM (LLM_PROVIDER)
 │   ├── orchestrator.py             # Pipeline coordinator — sequential execution
 │   ├── lab_analysis_agent.py       # Agent 1: blood marker interpretation — RAG via MCP (Module 6)
 │   ├── nutrition_agent.py          # Agent 2: 7-day meal plan — RAG via MCP (Module 6)
@@ -202,12 +208,12 @@ ai-health-orchestration/
 │
 ├── services/
 │   ├── llm/
-│   │   └── Dockerfile              # vLLM container configuration
+│   │   └── Dockerfile              # vLLM container (optional `vllm` Compose profile)
 │   ├── mcp-rag/                    # ✅ Module 6: MCP server wrapping RAG corpus
 │   │   ├── Dockerfile              # CPU-only torch — no GPU needed for embeddings
 │   │   └── mcp_server.py           # FastMCP server: 4 named tools + retrieve_context
 │   ├── api/                        # ✅ FastAPI middleware
-│   │   ├── Dockerfile              # Copies agents/ and rag/ from project root
+│   │   ├── Dockerfile              # CPU-only torch; copies agents/ and rag/ from project root
 │   │   ├── main.py                 # FastAPI app — registers all routers
 │   │   ├── routes/
 │   │   │   ├── chat.py             # POST /api/chat (parallel RAG + base)
@@ -216,7 +222,7 @@ ai-health-orchestration/
 │   │   ├── core/
 │   │   │   ├── comparator.py       # asyncio.gather() RAG vs base runner
 │   │   │   ├── metrics.py          # Grounding score, token count helpers
-│   │   │   └── config.py           # Service URLs, timeouts
+│   │   │   └── config.py           # Service URLs (env-driven)
 │   │   └── requirements.txt
 │   └── frontend/                   # ✅ React/Vite dashboard
 │       ├── Dockerfile
@@ -230,7 +236,6 @@ ai-health-orchestration/
 │           └── index.css
 │
 ├── scripts/
-│   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
 │   ├── ingest.py                   # Module 3: RAG corpus ingestion pipeline
 │   ├── test_rag.py                 # Module 4: RAG pipeline CLI test tool
 │   └── test_orchestration.py       # Module 5: full pipeline CLI test tool
@@ -242,19 +247,14 @@ ai-health-orchestration/
 │   ├── pipeline.py                 # Main RAG orchestration class
 │   └── evaluate.py                 # RAG vs no-RAG evaluation suite
 │
-├── training/
-│   ├── train.py                    # QLoRA fine-tuning script
-│   ├── evaluate.py                 # Base vs fine-tuned comparison
-│   ├── config.yaml                 # Training hyperparameters
-│   ├── evaluation_results.json
-│   └── dataset/
-│       └── processed/
-│           └── health_training_data.jsonl
+├── tests/
+│   └── test_llm_client.py          # Unit tests for the LLM client (botocore Stubber, httpx mock)
 │
-├── models/                         # ⚠️ NOT IN GIT
-│   ├── llama/                      # Llama 3.1 8B Instruct fp16 (~15 GB)
-│   └── adapters/
-│       └── health-v1/              # LoRA adapter from Module 2 (~161 MB)
+├── docs/
+│   └── aws-runbook.md              # AWS migration runbook (Bedrock, EC2, IAM, Chroma copy)
+│
+├── models/                         # ⚠️ NOT IN GIT — only needed for LLM_PROVIDER=vllm
+│   └── llama/                      # Llama 3.1 8B Instruct (place manually)
 │
 └── data/
     ├── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
@@ -265,8 +265,17 @@ ai-health-orchestration/
 
 ## Services
 
-### LLM Service — vLLM + Llama 3.1 8B Instruct
+### LLM — Claude Opus 5.5 via Amazon Bedrock (default)
 
+- **Client:** `agents/llm_client.py` — `complete(system, user, max_tokens, temperature)` used by `agents/base.py`, `rag/pipeline.py` and `services/api/core/comparator.py`
+- **API:** Bedrock Converse (`bedrock-runtime`), adaptive retries via botocore; throttling / access / validation errors mapped to `LLMThrottledError` / `LLMAccessDeniedError` / `LLMValidationError`
+- **Auth:** default boto3 credential chain — the EC2 instance role in production (no API keys)
+- **Generation settings:** unchanged from the vLLM setup (agents 2048 tokens / 0.2, chat 1024 / 0.3)
+- See [LLM Provider Configuration](#llm-provider-configuration) and [docs/aws-runbook.md](docs/aws-runbook.md)
+
+### LLM Service — vLLM + Llama 3.1 8B Instruct (optional, `vllm` profile)
+
+- Started only with `make start-vllm` (`LLM_PROVIDER=vllm docker compose --profile vllm up -d`); requires a GPU host and weights placed manually in `./models/llama`
 - **Image:** `vllm/vllm-openai:latest`
 - **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, on-the-fly 4-bit via BitsAndBytes)
 - **Port:** `8000`
@@ -307,7 +316,7 @@ ai-health-orchestration/
   - `POST /api/orchestrate` — start async pipeline job, returns `{job_id}`
   - `GET /api/orchestrate/status/{job_id}` — poll job status
   - `GET /api/orchestrate/result/{job_id}` — fetch completed result
-  - `GET /api/health` — liveness check
+  - `GET /api/health` — reports `llm` (provider, model, status — via `bedrock:GetFoundationModel`/`GetInferenceProfile` or vLLM `/v1/models`) and `chromadb`
 
 ### Frontend Dashboard — React + Vite
 
@@ -370,14 +379,14 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 
 ## Prerequisites
 
-1. **Ubuntu 22.04 LTS**
-2. **NVIDIA GPU drivers** (535+) and **CUDA 12.2**
-3. **Docker** + **Docker Compose plugin**
-4. **NVIDIA Container Toolkit**
-5. **Git**
-6. **Python 3.12 + python3.12-venv**
-7. **HuggingFace account** with Meta Llama 3.1 license accepted
-8. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
+1. **Ubuntu 22.04 LTS** (CPU-only instance is sufficient with Bedrock)
+2. **Docker** + **Docker Compose plugin**
+3. **Git**
+4. **Python 3.12 + python3.12-venv**
+5. **AWS access to Bedrock** with Claude Opus 5.5 enabled (EC2 instance role in production; see [docs/aws-runbook.md](docs/aws-runbook.md))
+6. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
+
+Only for the optional vLLM backend: NVIDIA GPU drivers (535+), CUDA 12.2, NVIDIA Container Toolkit, and Llama 3.1 8B weights in `./models/llama`.
 
 ---
 
@@ -388,7 +397,7 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 sudo apt update && sudo apt upgrade -y
 ```
 
-### Step 2 — Verify GPU
+### Step 2 — Verify GPU (vLLM backend only)
 ```bash
 nvidia-smi
 ```
@@ -407,7 +416,7 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo usermod -aG docker $USER && newgrp docker
 ```
 
-### Step 4 — Install NVIDIA Container Toolkit
+### Step 4 — Install NVIDIA Container Toolkit (vLLM backend only)
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
   sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
@@ -441,14 +450,32 @@ cd ai-health-orchestration
 
 ---
 
-## Model Download
+## LLM Provider Configuration
+
+All generation goes through `agents/llm_client.py`, configured by environment variables
+(put them in a git-ignored `.env` next to `docker-compose.yml`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LLM_PROVIDER` | `bedrock` | `bedrock` or `vllm` |
+| `BEDROCK_MODEL_ID` | — (required for bedrock) | Opus 5.5 model ID or cross-region inference-profile ID |
+| `AWS_REGION` | boto3 default chain | Bedrock region |
+| `LLM_MAX_ATTEMPTS` | `5` | botocore adaptive-retry attempts |
+| `LLM_TIMEOUT` | `600` | Request timeout (s) |
+| `VLLM_URL` | `http://localhost:8000` (`http://llm:8000` in Compose) | vLLM base URL |
+| `VLLM_MODEL` | `/models/llama` | vLLM served model name |
 
 ```bash
-export HF_TOKEN="hf_your_token_here"
-bash scripts/download_model.sh
+# Bedrock (default)
+echo -e "AWS_REGION=<region>\nBEDROCK_MODEL_ID=<model-id>" > .env
+make start && make test-llm
+
+# Local vLLM (GPU host, weights placed manually in ./models/llama)
+make start-vllm
 ```
 
-Downloads `meta-llama/Meta-Llama-3.1-8B-Instruct` (~15 GB) to `./models/llama/`.
+Credentials use the default boto3 chain — on EC2 the instance role (IMDSv2 hop limit must be 2 for containers).
+For local testing outside EC2, export `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` (e.g. from `aws configure export-credentials --format env`) before `make start`; Compose passes them through to the `api` container.
 
 ---
 
@@ -498,6 +525,13 @@ npx @modelcontextprotocol/inspector
 ### Health check
 ```bash
 curl http://localhost:8002/api/health | python3 -m json.tool
+make test-llm        # one-shot prompt through the configured provider
+```
+
+### Unit tests
+```bash
+pip install -r requirements-dev.txt
+make test            # pytest — LLM client (Bedrock via botocore Stubber, vLLM via httpx mock)
 ```
 
 ### RAG pipeline
@@ -505,7 +539,9 @@ curl http://localhost:8002/api/health | python3 -m json.tool
 source ~/.venv-rag/bin/activate
 python scripts/test_rag.py --health-check
 python scripts/test_rag.py --type lab_analysis --compare
+python scripts/test_rag.py --type meal_plan --provider vllm --vllm-url http://localhost:8000
 ```
+Generation in `test_rag.py` uses `$LLM_PROVIDER` (override with `--provider`); `--vllm-url` only applies in vLLM mode.
 
 ### Full orchestration pipeline (CLI)
 ```bash
@@ -554,12 +590,12 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 
 | Command | Description |
 |---------|-------------|
-| `make start` | Build and start all services |
+| `make start` | Build and start all services (Bedrock) |
+| `make start-vllm` | Start all services plus the local vLLM `llm` service (GPU) |
 | `make stop` | Stop and remove all containers |
 | `make logs` | Follow live logs |
-| `make download-model` | Download Llama 3.1 8B |
-| `make test-llm` | Send test prompt to vLLM |
-| `make build-frontend` | Rebuild api and frontend images |
+| `make test-llm` | One-shot prompt through the configured LLM provider (`python -m agents.llm_client` in the api container) |
+| `make test` | Run unit tests |
 
 ---
 
@@ -568,9 +604,9 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 | Data | In Git? | Migrate how? |
 |------|---------|--------------|
 | Code & config | ✅ Yes | `git clone` |
-| Llama 3.1 model | ❌ No | `bash scripts/download_model.sh` |
-| LoRA adapter | ❌ No | Re-train or `scp` |
-| Vector DB data | ❌ No | `scp ./data/chroma/` or re-run `ingest.py` |
+| LLM config | ❌ No | `.env` (`LLM_PROVIDER`, `AWS_REGION`, `BEDROCK_MODEL_ID`) + instance role |
+| Llama 3.1 model (vLLM only) | ❌ No | Copy into `./models/llama` manually |
+| Vector DB data | ❌ No | Archive `./data/chroma/` to S3 and restore (see [runbook](docs/aws-runbook.md)) or re-run `ingest.py` |
 | Corpus files | ❌ No | `scp ./data/corpus/` |
 
 **Note:** the EC2 instance's public IP changes on stop/start unless an Elastic IP is attached. If services become unreachable after a restart, check the current IP first (`curl -s http://169.254.169.254/latest/meta-data/public-ipv4`) before debugging anything else.
@@ -578,6 +614,13 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 ---
 
 ## Troubleshooting
+
+### `/api/health` shows `llm` error
+- `BEDROCK_MODEL_ID is not set` — add it to `.env` and `docker compose up -d api`.
+- `AccessDeniedException` — instance role lacks `bedrock:InvokeModel`/`GetFoundationModel`/`GetInferenceProfile`, or model access isn't enabled in the region.
+- `Unable to locate credentials` inside the container — set the EC2 IMDSv2 hop limit to 2.
+- `ValidationException` — wrong model ID/region; Opus 5.5 may require a cross-region inference-profile ID.
+- `ThrottlingException` after retries — check Bedrock quotas; raise `LLM_MAX_ATTEMPTS` or request a quota increase.
 
 ### vLLM OOM on startup
 Ensure `--enforce-eager` is in `docker-compose.yml` command. T4 cannot run CUDA graph warmup.
@@ -634,6 +677,7 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 
 - QLoRA: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA rank=16 alpha=32
 - 21-example health domain dataset, LoRA adapter: `./models/adapters/health-v1/` (~161 MB)
+- `training/` and `scripts/download_model.sh` were removed in the Bedrock migration (Opus cannot be fine-tuned with them); see git history
 
 **Key learnings:** AWQ is inference-only · BitsAndBytes NF4 is the correct QLoRA path
 

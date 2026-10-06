@@ -10,23 +10,25 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-import httpx
 from pydantic import BaseModel
 
+from agents import llm_client
 from agents.schemas import HealthProfile, UserGoals
 
 logger = logging.getLogger(__name__)
 
-VLLM_URL        = "http://localhost:8000/v1/chat/completions"
-VLLM_MODEL      = "/models/llama"
 MAX_TOKENS      = 2048
 TEMPERATURE     = 0.2
-REQUEST_TIMEOUT = 600
 MAX_RETRIES     = 2
+
+SYSTEM_PROMPT = (
+    "You are a specialist health AI assistant. "
+    "You always respond with valid JSON only — "
+    "no prose, no markdown fences, no explanations outside the JSON."
+)
 
 
 class BaseAgent(ABC):
@@ -111,38 +113,22 @@ class BaseAgent(ABC):
             return ""
 
     def _call_llm(self, prompt: str, attempt: int = 1) -> str:
+        backend = llm_client.get_backend()
         logger.info(
-            f"[{self.AGENT_NAME}] Calling vLLM "
+            f"[{self.AGENT_NAME}] Calling {backend.provider} "
             f"(attempt {attempt}, prompt_len={len(prompt)})"
         )
-        payload = {
-            "model": VLLM_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a specialist health AI assistant. "
-                        "You always respond with valid JSON only — "
-                        "no prose, no markdown fences, no explanations outside the JSON."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": getattr(self, "MAX_TOKENS_OVERRIDE", MAX_TOKENS),
-            "temperature": TEMPERATURE,
-        }
-
-        t0 = time.time()
-        with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-            response = client.post(VLLM_URL, json=payload)
-            response.raise_for_status()
-
-        elapsed = time.time() - t0
-        data = response.json()
-        raw = data["choices"][0]["message"]["content"].strip()
-
-        logger.info(f"[{self.AGENT_NAME}] vLLM response in {elapsed:.1f}s ({len(raw)} chars)")
-        return raw
+        result = backend.complete(
+            system=SYSTEM_PROMPT,
+            user=prompt,
+            max_tokens=getattr(self, "MAX_TOKENS_OVERRIDE", MAX_TOKENS),
+            temperature=TEMPERATURE,
+        )
+        logger.info(
+            f"[{self.AGENT_NAME}] {backend.provider} response in {result.latency_s:.1f}s "
+            f"({len(result.text)} chars, in={result.input_tokens} out={result.output_tokens} tokens)"
+        )
+        return result.text
 
     def _extract_json(self, raw: str) -> dict:
         fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
