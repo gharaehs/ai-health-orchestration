@@ -16,7 +16,8 @@ Built as part of the **AI Technical Deep Dive** mentorship program.
 - [Frontend Dashboard](#frontend-dashboard)
 - [Prerequisites](#prerequisites)
 - [Fresh Server Setup Guide](#fresh-server-setup-guide)
-- [Model Download](#model-download)
+- [LLM Provider — Amazon Bedrock](#llm-provider--amazon-bedrock)
+- [Deploying to the company AWS account (manual)](#deploying-to-the-company-aws-account-manual)
 - [RAG Corpus Ingestion](#rag-corpus-ingestion)
 - [Running the System](#running-the-system)
 - [Testing & Verification](#testing--verification)
@@ -34,13 +35,15 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 
 | Module | Topic | Status |
 |--------|-------|--------|
-| Module 1 | Local LLM Deployment & Quantization | ✅ Complete |
-| Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | ✅ Complete |
+| Module 1 | Local LLM Deployment & Quantization | ✅ Complete (retired — see note) |
+| Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | ✅ Complete (retired — see note) |
 | Module 3 | Vector Database & RAG Corpus Ingestion | ✅ Complete |
 | Module 4 | Retrieval-Augmented Generation (RAG) | ✅ Complete |
 | Module 5 | Agentic AI / Multi-Agent Orchestration | ✅ Complete |
 | Module 6 | Model Context Protocol (MCP) | ✅ Complete |
 | Frontend | Analytics Dashboard & Orchestration UI | ✅ Complete |
+
+> **Note:** the system now uses **Claude Opus 5.5 on Amazon Bedrock** for all LLM calls. The self-hosted vLLM / Llama 3.1 8B server (Module 1) and the LoRA adapter (Module 2) have been retired; their code remains in git history.
 
 **Core capabilities:**
 - Ingest structured health data (scale metrics, blood tests, medical history)
@@ -55,39 +58,37 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        EC2 g4dn.xlarge                          │
-│                     Ubuntu 22.04 + CUDA 12.2                    │
-│                                                                  │
-│  ┌──────────────────────┐    ┌──────────────────────────────┐   │
-│  │   vLLM Container     │    │    ChromaDB Container         │   │
-│  │   Port: 8000         │    │    Port: 8001 (host)          │   │
+                         ┌──────────────────────────────────┐
+                         │  Amazon Bedrock (Converse API)   │
+                         │  Claude Opus 5.5                 │
+                         │  (inference profile, IAM role)   │
+                         └────────────────▲─────────────────┘
+                                          │ HTTPS (boto3, instance-role creds)
+┌─────────────────────────────────────────┼───────────────────────┐
+│                 EC2 (CPU-only, e.g. 4 vCPU / 16 GB)              │
+│                         Ubuntu 22.04                             │
+│                                         │                        │
+│  ┌──────────────────────┐    ┌──────────┴───────────────────┐   │
+│  │   FastAPI Container  │    │    ChromaDB Container         │   │
+│  │   Port: 8002         │    │    Port: 8001 (host)          │   │
 │  │                      │    │    Port: 8000 (internal)      │   │
-│  │  Llama 3.1 8B        │    │  4 Collections (13,349 docs)  │   │
-│  │  Instruct (fp16)     │    │  - public_health_recs         │   │
-│  │  GPU: Tesla T4       │    │  - nutrition_guidelines       │   │
-│  └──────────┬───────────┘    │  - gym_programming            │   │
-│             │                │  - food_and_recipes           │   │
-│             ▼                └──────────────┬───────────────┘   │
-│  ┌──────────────────────┐                   │ (queried only     │
-│  │   FastAPI Container  │                   │  by MCP server)   │
-│  │   Port: 8002         │                   ▼                   │
-│  │                      │    ┌──────────────────────────────┐   │
-│  │  RAG pipeline        │    │   MCP RAG Server (Module 6)   │   │
-│  │  Multi-agent orch.   │◄──►│   Port: 8004                  │   │
-│  │  Async job system    │MCP │   Wraps HealthRetriever        │   │
-│  │  MCP client (Lab,    │    │   4 named tools + retrieve_    │   │
-│  │  Nutrition, Training) │   │   context (collection-routed)  │   │
-│  └──────────────────────┘    └──────────────────────────────┘   │
-│             │                                                    │
-│             ▼                                                    │
+│  │  Shared LLM client   │    │  4 Collections (13,349 docs)  │   │
+│  │  (llm/ → Bedrock)    │    │  - public_health_recs         │   │
+│  │  RAG pipeline        │    │  - nutrition_guidelines       │   │
+│  │  Multi-agent orch.   │    │  - gym_programming            │   │
+│  │  Async job system    │    │  - food_and_recipes           │   │
+│  │  MCP client (Lab,    │    └──────────────┬───────────────┘   │
+│  │  Nutrition, Training)│                   │ (queried only     │
+│  └──────────┬───────────┘                   │  by MCP server)   │
+│             │      MCP     ┌────────────────▼─────────────┐     │
+│             └─────────────►│   MCP RAG Server (Module 6)  │     │
+│             │              │   Port: 8004                 │     │
+│             ▼              └──────────────────────────────┘     │
 │  ┌──────────────────────┐                                       │
-│  │   React/Vite Container│                                      │
-│  │   Port: 3000          │                                      │
+│  │  React/Vite Container│                                       │
+│  │  Port: 3000          │                                       │
 │  └──────────────────────┘                                       │
 │                                                                  │
-│    ./models/llama/       (mounted volume, not in git)           │
-│    ./models/adapters/    (LoRA adapters, not in git)            │
 │    ./data/chroma/        (mounted volume, persisted to disk)    │
 │    ./data/corpus/        (corpus files, not in git)             │
 │                                                                  │
@@ -106,18 +107,22 @@ Orchestrator
     │       interprets blood markers against clinical reference ranges
     │       outputs: dietary_constraints, training_constraints, TDEE, target_calories
     │
-    ├── 2. NutritionAgent    → nutrition_guidelines + food_and_recipes (via MCP server, Module 6)
-    │       generates 7-day meal plan (split: Mon–Thu + Fri–Sun)
-    │       consumes: dietary_constraints, recommended_calories from Lab Analysis
+    ├── 2. NutritionAgent ─┐ → nutrition_guidelines + food_and_recipes (via MCP)
+    │       (in parallel)  │   generates the full 7-day meal plan in one call
+    │                      │   consumes: dietary_constraints, recommended_calories
+    │                      │
+    ├── 3. TrainingAgent ──┘ → gym_programming (via MCP server, Module 6)
+    │                          generates weekly gym program (sets, reps, progression)
+    │                          consumes: training_constraints from Lab Analysis
     │
-    ├── 3. TrainingAgent     → gym_programming (via MCP server, Module 6)
-    │       generates weekly gym program (sets, reps, progression)
-    │       consumes: training_constraints from Lab Analysis
-    │
-    └── 4. GroceryAgent      → no ChromaDB retrieval — aggregates from NutritionOutput only
+    └── 4. GroceryAgent      → starts as soon as Nutrition succeeds; no ChromaDB retrieval
             aggregates ingredients across 7 days into shopping list
-            uses: per-category LLM consolidation (fuzzy deduplication)
+            uses: per-category LLM consolidation, categories run concurrently
             consumes: weekly_plan from Nutrition Agent
+
+All agent outputs are produced via Bedrock tool use: each agent's Pydantic
+schema is sent as a forced tool, so the model returns validated structured
+data (no free-text JSON extraction).
 ```
 
 **RAG pipeline (Module 4):**
@@ -131,7 +136,7 @@ HealthRAGPipeline (rag/pipeline.py)
     ├── 1. Embed query → sentence-transformers/all-MiniLM-L6-v2 (CPU)
     ├── 2. Retrieve → ChromaDB (port 8001) — collection routed by query type
     ├── 3. Build augmented prompt → STRUCTURED strategy (labelled context blocks)
-    └── 4. Generate → vLLM API (port 8000) → Structured JSON response
+    └── 4. Generate → shared LLM client (llm/) → Claude Opus 5.5 on Bedrock
 ```
 
 **MCP retrieval path (Module 6 — all three retrieval-using agents):**
@@ -157,26 +162,16 @@ Used identically by `LabAnalysisAgent` (`query_type="lab_analysis"`), `Nutrition
 
 ## Infrastructure & Hardware
 
+No GPU is required — inference runs on Amazon Bedrock. The instance only hosts
+the API, ChromaDB, the MCP server (CPU embeddings) and the frontend.
+
 | Component | Specification |
 |-----------|--------------|
-| **Instance** | AWS EC2 g4dn.xlarge |
-| **GPU** | NVIDIA Tesla T4 — 16 GB VRAM |
-| **CPU** | 4 vCPUs |
-| **RAM** | 16 GB |
-| **Storage** | 80 GB SSD (NVMe) |
+| **Instance** | CPU-only EC2, e.g. `m7i.xlarge` / `t3.xlarge` (4 vCPU, 16 GB RAM) |
+| **Storage** | ≥ 40 GB gp3 (Docker images + ChromaDB data) |
 | **OS** | Ubuntu 22.04 LTS |
-| **CUDA** | 12.2 |
-| **Driver** | 535.288.01 |
-
-**GPU Memory Usage (Llama 3.1 8B fp16 via vLLM):**
-
-| Component | VRAM Used |
-|-----------|-----------|
-| Llama 3.1 8B (bitsandbytes 4-bit) | ~5.65 GB |
-| KV Cache (PagedAttention) | ~6.8 GB |
-| System overhead | ~0.5 GB |
-| Safety buffer (15%) | ~2.1 GB |
-| **Total available** | **14.58 GB** |
+| **LLM** | Claude Opus 5.5 via Amazon Bedrock (Converse API), billed per token |
+| **Auth** | EC2 instance role (no AWS keys on the box) |
 
 ---
 
@@ -193,21 +188,26 @@ ai-health-orchestration/
 ├── agents/                         # ✅ Module 5: Multi-agent orchestration
 │   ├── __init__.py
 │   ├── schemas.py                  # Pydantic I/O contracts for all agents
-│   ├── base.py                     # Abstract BaseAgent: RAG, LLM, retry, JSON parsing
-│   ├── orchestrator.py             # Pipeline coordinator — sequential execution
+│   ├── base.py                     # Abstract BaseAgent: RAG, structured LLM output, retry
+│   ├── orchestrator.py             # Pipeline coordinator — Lab → (Nutrition ∥ Training) → Grocery
 │   ├── lab_analysis_agent.py       # Agent 1: blood marker interpretation — RAG via MCP (Module 6)
 │   ├── nutrition_agent.py          # Agent 2: 7-day meal plan — RAG via MCP (Module 6)
 │   ├── training_agent.py           # Agent 3: weekly gym program — RAG via MCP (Module 6)
 │   └── grocery_agent.py            # Agent 4: per-category shopping list (no RAG/MCP — aggregates from NutritionOutput)
 │
+├── llm/                            # Shared Bedrock LLM client (Converse API)
+│   ├── config.py                   # Env-var configuration (region, model ID, limits)
+│   ├── client.py                   # generate_text / generate_structured (tool use) + retries
+│   └── health.py                   # Cached 1-token health probe for /api/health
+│
+├── tests/                          # pytest suite (Bedrock stubbed — no AWS needed)
+│
 ├── services/
-│   ├── llm/
-│   │   └── Dockerfile              # vLLM container configuration
 │   ├── mcp-rag/                    # ✅ Module 6: MCP server wrapping RAG corpus
 │   │   ├── Dockerfile              # CPU-only torch — no GPU needed for embeddings
 │   │   └── mcp_server.py           # FastMCP server: 4 named tools + retrieve_context
 │   ├── api/                        # ✅ FastAPI middleware
-│   │   ├── Dockerfile              # Copies agents/ and rag/ from project root
+│   │   ├── Dockerfile              # Copies agents/, rag/ and llm/ from project root
 │   │   ├── main.py                 # FastAPI app — registers all routers
 │   │   ├── routes/
 │   │   │   ├── chat.py             # POST /api/chat (parallel RAG + base)
@@ -216,8 +216,9 @@ ai-health-orchestration/
 │   │   ├── core/
 │   │   │   ├── comparator.py       # asyncio.gather() RAG vs base runner
 │   │   │   ├── metrics.py          # Grounding score, token count helpers
-│   │   │   └── config.py           # Service URLs, timeouts
-│   │   └── requirements.txt
+│   │   │   └── config.py           # Service URLs, MAX_CONCURRENT_JOBS
+│   │   ├── requirements.txt
+│   │   └── requirements-dev.txt    # requirements.txt + pytest
 │   └── frontend/                   # ✅ React/Vite dashboard
 │       ├── Dockerfile
 │       ├── package.json
@@ -230,7 +231,6 @@ ai-health-orchestration/
 │           └── index.css
 │
 ├── scripts/
-│   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
 │   ├── ingest.py                   # Module 3: RAG corpus ingestion pipeline
 │   ├── test_rag.py                 # Module 4: RAG pipeline CLI test tool
 │   └── test_orchestration.py       # Module 5: full pipeline CLI test tool
@@ -242,20 +242,6 @@ ai-health-orchestration/
 │   ├── pipeline.py                 # Main RAG orchestration class
 │   └── evaluate.py                 # RAG vs no-RAG evaluation suite
 │
-├── training/
-│   ├── train.py                    # QLoRA fine-tuning script
-│   ├── evaluate.py                 # Base vs fine-tuned comparison
-│   ├── config.yaml                 # Training hyperparameters
-│   ├── evaluation_results.json
-│   └── dataset/
-│       └── processed/
-│           └── health_training_data.jsonl
-│
-├── models/                         # ⚠️ NOT IN GIT
-│   ├── llama/                      # Llama 3.1 8B Instruct fp16 (~15 GB)
-│   └── adapters/
-│       └── health-v1/              # LoRA adapter from Module 2 (~161 MB)
-│
 └── data/
     ├── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
     └── corpus/                     # ⚠️ NOT IN GIT — raw corpus files
@@ -265,13 +251,13 @@ ai-health-orchestration/
 
 ## Services
 
-### LLM Service — vLLM + Llama 3.1 8B Instruct
+### LLM — Claude Opus 5.5 on Amazon Bedrock
 
-- **Image:** `vllm/vllm-openai:latest`
-- **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, on-the-fly 4-bit via BitsAndBytes)
-- **Port:** `8000`
-- **API:** OpenAI-compatible (`/v1/chat/completions`, `/v1/models`)
-- **Runtime flags:** `--dtype float16` · `--max-model-len 16384` · `--gpu-memory-utilization 0.85` · `--enforce-eager` · `--quantization bitsandbytes`
+- **Not a container** — the API calls Bedrock directly through the shared client in `llm/`
+- **API:** Bedrock Runtime Converse (`boto3`), structured outputs via forced tool use
+- **Auth:** AWS default credential chain (EC2 instance role in production)
+- **Retries:** throttling / transient errors retried with adaptive backoff (`LLM_MAX_RETRIES`)
+- **Config:** see [LLM Provider — Amazon Bedrock](#llm-provider--amazon-bedrock)
 
 ### Vector Database — ChromaDB
 
@@ -307,7 +293,7 @@ ai-health-orchestration/
   - `POST /api/orchestrate` — start async pipeline job, returns `{job_id}`
   - `GET /api/orchestrate/status/{job_id}` — poll job status
   - `GET /api/orchestrate/result/{job_id}` — fetch completed result
-  - `GET /api/health` — liveness check
+  - `GET /api/health` — ChromaDB + Bedrock check (`services.llm` = `{status, model, detail?}`; LLM probe cached 60s)
 
 ### Frontend Dashboard — React + Vite
 
@@ -327,7 +313,7 @@ The Orchestrate tab runs the full 4-agent pipeline from the browser:
 3. When status is `"complete"`, browser fetches `/api/orchestrate/result/{job_id}`
 4. Results display in collapsible panels per agent
 
-This async job pattern avoids long-held HTTP connections through the Vite proxy, which cannot hold connections open for 7+ minutes.
+This async job pattern avoids long-held HTTP connections through the Vite proxy, which drops connections after ~2 minutes. Up to `MAX_CONCURRENT_JOBS` (default 3) jobs run at once; further jobs queue.
 
 **Agent output panels:**
 - **🔬 Lab Analysis** — TDEE, caloric target, dietary constraints, training constraints, per-marker interpretation with status and reference ranges
@@ -371,13 +357,11 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 ## Prerequisites
 
 1. **Ubuntu 22.04 LTS**
-2. **NVIDIA GPU drivers** (535+) and **CUDA 12.2**
-3. **Docker** + **Docker Compose plugin**
-4. **NVIDIA Container Toolkit**
-5. **Git**
-6. **Python 3.12 + python3.12-venv**
-7. **HuggingFace account** with Meta Llama 3.1 license accepted
-8. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
+2. **Docker** + **Docker Compose plugin**
+3. **Git**
+4. **Python 3.12 + python3.12-venv**
+5. **AWS account access** with Claude Opus 5.5 enabled in Amazon Bedrock and an EC2 instance role allowed to invoke it (see [Deploying to the company AWS account](#deploying-to-the-company-aws-account-manual))
+6. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
 
 ---
 
@@ -388,12 +372,7 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 sudo apt update && sudo apt upgrade -y
 ```
 
-### Step 2 — Verify GPU
-```bash
-nvidia-smi
-```
-
-### Step 3 — Install Docker
+### Step 2 — Install Docker
 ```bash
 sudo apt install -y ca-certificates curl gnupg
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -407,19 +386,7 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo usermod -aG docker $USER && newgrp docker
 ```
 
-### Step 4 — Install NVIDIA Container Toolkit
-```bash
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
-  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt update && sudo apt install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-```
-
-### Step 5 — Git + GitHub SSH
+### Step 3 — Git + GitHub SSH
 ```bash
 sudo apt install -y git
 git config --global user.name "Your Name"
@@ -428,12 +395,12 @@ ssh-keygen -t ed25519 -C "your@email.com"
 cat ~/.ssh/id_ed25519.pub   # Add to GitHub → Settings → SSH keys
 ```
 
-### Step 6 — Python venv
+### Step 4 — Python venv
 ```bash
 sudo apt install -y python3.12-venv python-is-python3
 ```
 
-### Step 7 — Clone
+### Step 5 — Clone
 ```bash
 git clone git@github.com:gharaehs/ai-health-orchestration.git
 cd ai-health-orchestration
@@ -441,14 +408,71 @@ cd ai-health-orchestration
 
 ---
 
-## Model Download
+## LLM Provider — Amazon Bedrock
 
-```bash
-export HF_TOKEN="hf_your_token_here"
-bash scripts/download_model.sh
-```
+There is no model to download. All LLM calls go through `llm/` to Claude Opus 5.5
+on Bedrock. The `api` container is configured with these environment variables
+(defaults in `docker-compose.yml`; override them in a `.env` file next to it):
 
-Downloads `meta-llama/Meta-Llama-3.1-8B-Instruct` (~15 GB) to `./models/llama/`.
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AWS_REGION` | `us-east-1` | Bedrock region |
+| `BEDROCK_MODEL_ID` | `global.anthropic.claude-opus-5-5-v1:0` | Model or inference profile ID — **placeholder; copy the exact ID from the Bedrock console** |
+| `LLM_MAX_TOKENS` | `4096` | Default output-token cap per call |
+| `LLM_READ_TIMEOUT_S` | `300` | Read timeout per request |
+| `LLM_MAX_RETRIES` | `6` | Retries after the first attempt (throttling / transient errors) |
+| `NUTRITION_MAX_TOKENS` | `16000` | Output cap for the single 7-day meal-plan call |
+| `GROCERY_MAX_WORKERS` | `4` | Concurrent grocery category calls |
+| `MAX_CONCURRENT_JOBS` | `3` | Orchestration jobs run at once (others queue) |
+
+Credentials come from the AWS default chain — an EC2 instance role in production.
+**Never put AWS access keys in `.env` or `docker-compose.yml`.** For local
+development you can export a profile (`AWS_PROFILE`) and run the API outside Docker.
+
+---
+
+## Deploying to the company AWS account (manual)
+
+1. **Enable model access.** In the Bedrock console (target region) → *Model access*, request/enable **Claude Opus 5.5**.
+2. **Find the inference profile ID.** Bedrock console → *Cross-region inference* (inference profiles). Copy the Opus 5.5 profile ID (e.g. a `us.`/`eu.`/`global.`-prefixed `anthropic.claude-opus-…` ID) and its ARN. Use this as `BEDROCK_MODEL_ID` — the default in this repo is an assumption.
+3. **Create an IAM role for EC2** with a policy covering the inference profile **and** the underlying foundation-model ARNs in every region the profile routes to:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+       "Resource": [
+         "arn:aws:bedrock:<region>:<account-id>:inference-profile/<profile-id>",
+         "arn:aws:bedrock:*::foundation-model/<underlying-model-id>"
+       ]
+     }]
+   }
+   ```
+   (`bedrock:InvokeModel` also authorizes the Converse API.)
+4. **Launch a CPU-only instance**: Ubuntu 22.04, 4 vCPU / 16 GB RAM (e.g. `m7i.xlarge`), ≥ 40 GB gp3. Attach the IAM role.
+5. **Set the IMDS hop limit to 2** so Docker containers can reach instance-role credentials (IMDSv2 defaults to 1, which blocks containers):
+   ```bash
+   aws ec2 modify-instance-metadata-options --instance-id <id> \
+     --http-tokens required --http-put-response-hop-limit 2
+   ```
+6. **Security group:** allow inbound `3000` (frontend) and `8002` (API) from trusted IPs only; `22` for SSH. Open `8001`/`8004` only if you need direct ChromaDB / MCP access. Optionally attach an Elastic IP.
+7. **Set up the host** with the [Fresh Server Setup Guide](#fresh-server-setup-guide) (Docker, Git, clone).
+8. **Migrate data** — either copy from the old instance:
+   ```bash
+   scp -r old-host:~/ai-health-orchestration/data/chroma ./data/
+   scp -r old-host:~/ai-health-orchestration/data/corpus ./data/
+   ```
+   or re-run [RAG Corpus Ingestion](#rag-corpus-ingestion).
+9. **Configure env vars** in `.env` (at least `AWS_REGION` and `BEDROCK_MODEL_ID`; see table above).
+10. **Start and verify:**
+    ```bash
+    make start
+    make test-llm   # curl /api/health
+    # Optional: check every agent schema round-trips through Bedrock tool use
+    docker compose exec -T -e PYTHONPATH=/app api python - < scripts/spike_bedrock_schemas.py
+    ```
+    Expect `"status": "ok"`, `services.llm.status == "ok"` with your model ID, and `services.chromadb.collections == 4`. If `llm` reports an error, the `detail` field names the cause (`AccessDeniedException` → model access/IAM; `UnrecognizedClientException`/no credentials → instance role or IMDS hop limit; `ValidationException` → wrong model ID or region).
 
 ---
 
@@ -495,6 +519,12 @@ npx @modelcontextprotocol/inspector
 
 ## Testing & Verification
 
+### Unit tests (no AWS or Docker needed — Bedrock is stubbed)
+```bash
+pip install -r services/api/requirements-dev.txt
+pytest tests
+```
+
 ### Health check
 ```bash
 curl http://localhost:8002/api/health | python3 -m json.tool
@@ -537,8 +567,10 @@ Compare `prompt_len` in the api logs for each agent's first LLM call against its
 | Agent | Grounded `prompt_len` | Silent-fallback `prompt_len` |
 |-------|------------------------|-------------------------------|
 | LabAnalysisAgent | ~14,745 | ~hundreds (much shorter) |
-| NutritionAgent (Mon–Thu) | ~19,100–19,140 | ~1,700–1,800 |
+| NutritionAgent | ~19,000+ | ~1,700–1,800 |
 | TrainingAgent | ~19,007 | ~hundreds (much shorter) |
+
+(Baselines measured before the Bedrock migration; prompt wording changed slightly, so treat them as approximate — the signal is a sharp drop.)
 
 A sharp drop means `_retrieve()` hit an exception and silently fell back to `""` — check for `[<AgentName>] MCP retrieval error` in the logs.
 
@@ -557,9 +589,7 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 | `make start` | Build and start all services |
 | `make stop` | Stop and remove all containers |
 | `make logs` | Follow live logs |
-| `make download-model` | Download Llama 3.1 8B |
-| `make test-llm` | Send test prompt to vLLM |
-| `make build-frontend` | Rebuild api and frontend images |
+| `make test-llm` | Check `/api/health` (ChromaDB + Bedrock LLM) |
 
 ---
 
@@ -568,8 +598,7 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 | Data | In Git? | Migrate how? |
 |------|---------|--------------|
 | Code & config | ✅ Yes | `git clone` |
-| Llama 3.1 model | ❌ No | `bash scripts/download_model.sh` |
-| LoRA adapter | ❌ No | Re-train or `scp` |
+| LLM | n/a | Hosted on Bedrock — enable model access + IAM role (see deploy section) |
 | Vector DB data | ❌ No | `scp ./data/chroma/` or re-run `ingest.py` |
 | Corpus files | ❌ No | `scp ./data/corpus/` |
 
@@ -579,8 +608,17 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 
 ## Troubleshooting
 
-### vLLM OOM on startup
-Ensure `--enforce-eager` is in `docker-compose.yml` command. T4 cannot run CUDA graph warmup.
+### `/api/health` reports `llm: error`
+Read `services.llm.detail`:
+- `AccessDeniedException` — Opus 5.5 model access not enabled, or the IAM policy misses the inference profile / underlying model ARNs.
+- `UnrecognizedClientException`, `NoCredentialsError`, or `Unable to locate credentials` — container can't reach the instance role; set the IMDS hop limit to 2.
+- `ValidationException` (invalid model identifier) — wrong `BEDROCK_MODEL_ID` or `AWS_REGION`.
+- `ThrottlingException` — quota exceeded; lower `MAX_CONCURRENT_JOBS` / `GROCERY_MAX_WORKERS` or request a quota increase.
+
+The LLM probe is cached for 60s, so wait a minute after fixing before re-checking.
+
+### Agent fails with "Output failed schema validation after 2 attempts"
+The model's tool output didn't match the Pydantic schema twice. Usually caused by the output hitting the token cap (`stop_reason=max_tokens` in the logs) — raise `LLM_MAX_TOKENS` or `NUTRITION_MAX_TOKENS`.
 
 ### ChromaDB collections empty after restart
 Volume must mount `./data/chroma:/data`. Re-run `ingest.py` if data is lost.
@@ -597,9 +635,6 @@ docker builder prune -af
 rm -rf ~/.cache/pip ~/.cache/JetBrains
 ```
 If the failing step is installing `torch`, check whether the container actually needs GPU support. CPU-only containers (e.g. `mcp-rag`) should install torch via `--index-url https://download.pytorch.org/whl/cpu` — the default GPU wheel pulls in ~2.5 GB of unused `nvidia-cuda-*` packages.
-
-### vLLM uses FlashInfer instead of FlashAttention2
-Not an error. T4 (compute 7.5) does not support FlashAttention2 (requires 8.0+).
 
 ### ChromaDB v2 UUID error
 Already handled — `comparator.py` caches name→UUID mapping. Restart api container to clear cache.
@@ -621,7 +656,9 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 
 ## Module Progress
 
-### ✅ Module 1 — Local LLM Deployment
+> **Historical note:** Modules 1–2 (self-hosted vLLM + Llama 3.1 8B on a T4, and the QLoRA adapter) are **retired**. The system now uses Claude Opus 5.5 on Amazon Bedrock; `services/llm/`, `scripts/download_model.sh`, `training/` and `models/` were removed and remain available in git history. Timings and learnings in Modules 1–5 below were measured on the old T4 setup.
+
+### ✅ Module 1 — Local LLM Deployment (retired)
 
 - vLLM serving Llama 3.1 8B via OpenAI-compatible API on port 8000
 - `--enforce-eager` resolves T4 CUDA graph OOM
@@ -630,7 +667,7 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 
 ---
 
-### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA
+### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA (retired)
 
 - QLoRA: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA rank=16 alpha=32
 - 21-example health domain dataset, LoRA adapter: `./models/adapters/health-v1/` (~161 MB)
@@ -676,7 +713,7 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 - `services/api/routes/orchestrate.py` — async job system: `POST /api/orchestrate` returns `job_id` immediately; pipeline runs in `ThreadPoolExecutor`; browser polls `/status/{job_id}` every 10s; result fetched from `/result/{job_id}`
 - `services/frontend/src/App.tsx` — Orchestrate tab with 4-agent progress cards, collapsible result panels per agent, poll-based UI that avoids proxy timeout issues
 
-**Pipeline performance (full profile, 7 blood markers, fat_loss goal):**
+**Pipeline performance on the retired T4 setup (full profile, 7 blood markers, fat_loss goal):**
 
 | Agent | Collections | Duration |
 |-------|-------------|----------|
@@ -686,7 +723,7 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 | GroceryAgent | food_and_recipes (per-category) | ~90s (8 LLM calls) |
 | **Total** | | **~430s** |
 
-**Key design decisions:**
+**Key design decisions (original, pre-Bedrock — see [Design Decisions](#design-decisions) for current behaviour):**
 
 - **Sequential with data passing:** Lab Analysis output (dietary/training constraints, caloric target) flows into Nutrition and Training as hard constraints — not parallel, because downstream agents depend on upstream outputs
 - **Split generation for Nutrition:** 7-day JSON exceeds 2048-token output limit; split into Mon–Thu and Fri–Sun calls, merged in Python
@@ -752,25 +789,29 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 
 ## Design Decisions
 
-### Why sequential agents over parallel?
+### Why Claude Opus 5.5 on Amazon Bedrock?
 
-Lab Analysis outputs `dietary_constraints` and `training_constraints` that Nutrition and Training must respect. Nutrition outputs the `weekly_plan` that Grocery aggregates. The dependency graph is linear — parallelism would require a merge/reconcile step that adds complexity without benefit on a single T4.
+The project moved to a company AWS account. Bedrock removes the full-time GPU instance, gives a much stronger model with a large output budget, and authenticates through the instance role (no keys). The trade-offs — per-token cost, Bedrock quotas, and no offline operation — are accepted. The Converse API keeps the client model-agnostic: swapping models is a `BEDROCK_MODEL_ID` change.
 
-### Why split Nutrition generation into two calls?
+### Why tool use for structured outputs?
 
-A 7-day × 3-meal plan with ingredients, instructions, and macros consistently exceeds 2048 tokens. Splitting into Mon–Thu and Fri–Sun generates two valid JSON fragments that Python merges — simpler and more reliable than raising the token limit (which would slow generation significantly on T4).
+Each agent's Pydantic schema is sent as a single forced tool. The model's tool input is validated directly into the schema, which replaces brace-matching JSON extraction from free text. On validation failure the agent retries once, then fails with a clear error.
+
+### Why Lab first, then Nutrition ∥ Training?
+
+Lab Analysis outputs `dietary_constraints` and `training_constraints` that Nutrition and Training must respect, so it runs first. Nutrition and Training are independent of each other, so they run in parallel; Grocery starts as soon as Nutrition succeeds. On the old single-T4 setup this parallelism bought nothing; on Bedrock it cuts wall-clock time.
+
+### Why one Nutrition call instead of two?
+
+Llama on the T4 had a 2048-token output budget, so the 7-day plan was split into Mon–Thu and Fri–Sun calls and merged. Opus on Bedrock supports a much larger output budget (`NUTRITION_MAX_TOKENS`, default 16000), so the plan is generated in one call and validated to contain Monday–Sunday in order.
 
 ### Why per-category LLM consolidation for Grocery?
 
-Simple string matching fails on `"150g chicken breast"` vs `"chicken breast, diced, 200g"`. The LLM handles fuzzy normalisation naturally. Pre-bucketing by keyword (Python, instant) limits each LLM call to 10–20 items — well within 2048 tokens and never truncates.
+Simple string matching fails on `"150g chicken breast"` vs `"chicken breast, diced, 200g"`. The LLM handles fuzzy normalisation naturally. Pre-bucketing by keyword (Python, instant) limits each LLM call to 10–20 items, and the category calls run concurrently (`GROCERY_MAX_WORKERS`).
 
 ### Why async job polling instead of a long HTTP request?
 
-Vite's dev server proxy drops connections after ~2 minutes regardless of timeout configuration. A 7-minute pipeline request will always fail through the proxy. The async pattern (POST → job_id → poll status → fetch result) makes every individual HTTP call short, avoiding the proxy entirely as a bottleneck.
-
-### Why Llama 3.1 8B over Mistral 7B?
-
-128K context window vs 4K — essential for RAG with multiple retrieved chunks. Single model for both training (BitsAndBytes QLoRA) and inference (vLLM). AWQ-quantized models like Mistral 7B AWQ cannot be used for LoRA training.
+Vite's dev server proxy drops connections after ~2 minutes regardless of timeout configuration. A multi-minute pipeline request will always fail through the proxy. The async pattern (POST → job_id → poll status → fetch result) makes every individual HTTP call short, avoiding the proxy entirely as a bottleneck.
 
 ### Why four separate ChromaDB collections?
 
@@ -778,7 +819,7 @@ Collection-level isolation enforces domain separation cleanly — a Lab Analysis
 
 ### Why CPU for embeddings?
 
-Preserves the full 16 GB T4 VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — negligible for this workload.
+The instance has no GPU. `all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — negligible for this workload. (Originally chosen to keep the T4's VRAM free for Llama.)
 
 ### Why expose the RAG corpus as an MCP server, but not the agents themselves?
 
@@ -794,11 +835,11 @@ The initial conversion (NutritionAgent) was deliberately scoped to one agent fir
 
 - **GitHub Repository:** https://github.com/gharaehs/ai-health-orchestration
 - **Mentorship Program:** AI Technical Deep Dive
-- **Model:** https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
-- **vLLM Documentation:** https://docs.vllm.ai
+- **Amazon Bedrock Converse API:** https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html
+- **Bedrock inference profiles:** https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles.html
 - **ChromaDB Documentation:** https://docs.trychroma.com
 - **Model Context Protocol:** https://modelcontextprotocol.io
 
 ---
 
-*Last updated: Modules 1–6 complete (Module 6: RAG corpus exposed as MCP server, all three retrieval-using agents — Lab Analysis, Nutrition, Training — converted and verified end-to-end) · Frontend dashboard complete · June 2026*
+*Last updated: LLM migrated to Claude Opus 5.5 on Amazon Bedrock (Modules 1–2 retired) · Modules 1–6 complete (Module 6: RAG corpus exposed as MCP server, all three retrieval-using agents — Lab Analysis, Nutrition, Training — converted and verified end-to-end) · Frontend dashboard complete · June 2026*

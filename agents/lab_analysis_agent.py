@@ -21,7 +21,6 @@ calling HealthRetriever directly — see _retrieve()/_mcp_retrieve() below.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from typing import Any
@@ -64,6 +63,7 @@ class LabAnalysisAgent(BaseAgent):
 
     AGENT_NAME     = "LabAnalysisAgent"
     COLLECTION_KEY = "lab_analysis"   # → public_health_recommendations
+    OUTPUT_MODEL   = LabAnalysisOutput
 
     # ── Abstract method implementations ──────────────────────────────────────
 
@@ -152,43 +152,6 @@ class LabAnalysisAgent(BaseAgent):
         """
         tdee, recommended_calories = self._calculate_calories(profile, goals)
 
-        # Track whether real blood markers were submitted. Used both in the
-        # prompt instructions below AND as a hard post-generation guard in
-        # _parse_output(), so a hallucinated/copied example can never leak
-        # into the final output even if the LLM ignores the instruction.
-        self._has_blood_markers = bool(profile.blood_markers)
-
-        # NOTE: This is a STRUCTURE-ONLY template. Do not put realistic,
-        # clinically-specific values here (e.g. a real marker name + a
-        # plausible value + a plausible threshold) — models reliably copy
-        # vivid few-shot examples over sparse input data, which is exactly
-        # how a permanent "LDL elevated" hallucination got baked in before.
-        # Keep every field a generic placeholder.
-        schema_example = {
-            "analysed_markers": [
-                {
-                    "name": "<marker name, copied exactly from profile.blood_markers>",
-                    "value": "<numeric value from profile.blood_markers>",
-                    "unit": "<unit from profile.blood_markers>",
-                    "status": "<normal|borderline|elevated|low — your assessment>",
-                    "reference_range": "<range from retrieved guidelines above>",
-                    "interpretation": "<1 sentence>",
-                    "dietary_implication": "<single sentence string, or omit if not applicable>",
-                    "training_implication": "<single sentence string, or omit if not applicable>"
-                }
-            ],
-            "dietary_constraints": [
-                "<actionable bullet point>"
-            ],
-            "training_constraints": [
-                "<actionable bullet point>"
-            ],
-            "estimated_tdee": tdee,
-            "recommended_calories": recommended_calories,
-            "overall_health_summary": "2-3 sentence narrative summary.",
-            "sources_used": ["<source name from retrieved guidelines>"]
-        }
-
         parts = [
             rag_context,
             "",
@@ -211,7 +174,7 @@ class LabAnalysisAgent(BaseAgent):
             "",
         ]
 
-        if self._has_blood_markers:
+        if profile.blood_markers:
             marker_list = ", ".join(
                 f"{m.name} = {m.value} {m.unit}" for m in profile.blood_markers
             )
@@ -232,37 +195,28 @@ class LabAnalysisAgent(BaseAgent):
             ]
 
         parts += [
-            "Respond with ONLY valid JSON matching this exact schema.",
-            "IMPORTANT: every value shown below (e.g. the marker name, numbers,",
-            "status words, the reference range text) is a PLACEHOLDER describing",
-            "the expected type/shape, NOT real data. Do not copy any of these",
-            "placeholder values into your actual answer.",
-            json.dumps(schema_example, indent=2),
+            "Submit the analysis by calling the provided tool.",
         ]
         return "\n".join(parts)
 
-    def _parse_output(self, raw: str) -> LabAnalysisOutput:
-        data = self._extract_json(raw)
+    def _parse_output(self, output: LabAnalysisOutput, profile, goals, context) -> LabAnalysisOutput:
+        # Hard guard: if the user submitted no blood markers, force an empty
+        # analysed_markers list regardless of what the model returned. This
+        # keeps "no markers in → no markers out" a code invariant.
+        updates: dict[str, Any] = {}
+        if not profile.blood_markers and output.analysed_markers:
+            logger.warning(
+                f"[{self.AGENT_NAME}] LLM returned {len(output.analysed_markers)} "
+                f"analysed_markers with no blood_markers submitted — discarding."
+            )
+            updates["analysed_markers"] = []
 
-        # Hard guard: regardless of what the LLM returned, if the user
-        # submitted no blood markers, force an empty analysed_markers list.
-        # This makes the "no markers in → no markers out" guarantee a code
-        # invariant rather than something that depends on prompt compliance.
-        if not getattr(self, "_has_blood_markers", True):
-            if data.get("analysed_markers"):
-                logger.warning(
-                    f"[{self.AGENT_NAME}] LLM returned {len(data['analysed_markers'])} "
-                    f"analysed_markers with no blood_markers submitted — discarding "
-                    f"(likely hallucinated/copied from schema example)."
-                )
-            data["analysed_markers"] = []
-
-        # Flatten any list fields the LLM emitted as arrays instead of strings
-        for marker in data.get("analysed_markers", []):
-            for field in ("dietary_implication", "training_implication", "interpretation"):
-                if isinstance(marker.get(field), list):
-                    marker[field] = " ".join(marker[field])
-        return LabAnalysisOutput(**data)
+        # Calorie targets are deterministic (Mifflin-St Jeor); the prompt asks
+        # the model to echo them, and this guarantees they are exact.
+        tdee, recommended = self._calculate_calories(profile, goals)
+        updates["estimated_tdee"] = tdee
+        updates["recommended_calories"] = recommended
+        return output.model_copy(update=updates)
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

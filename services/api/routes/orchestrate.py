@@ -16,8 +16,8 @@ then fetches /result once.
 from __future__ import annotations
 
 import logging
-import asyncio
 import uuid
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -31,13 +31,13 @@ from agents.schemas import (
     UserGoals,
     OrchestrationResult,
 )
-from core.config import VLLM_URL, CHROMA_URL
+from core.config import CHROMA_URL, MAX_CONCURRENT_JOBS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ── Job store (in-memory) ─────────────────────────────────────────────────────
-# Stores job state and results. Simple dict is fine for single-user dev context.
+# Stores job state and results. Simple dict is fine for a small dev deployment.
 
 class Job(BaseModel):
     job_id: str
@@ -48,7 +48,9 @@ class Job(BaseModel):
     result: Optional[OrchestrationResult] = None
 
 _jobs: dict[str, Job] = {}
-_executor = ThreadPoolExecutor(max_workers=1)  # One pipeline at a time on T4
+# Jobs beyond MAX_CONCURRENT_JOBS queue in the executor and stay "pending"
+# until a worker picks them up.
+_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS, thread_name_prefix="job")
 
 
 # ── Orchestrator singleton ────────────────────────────────────────────────────
@@ -63,20 +65,19 @@ def _get_chroma_host_port() -> tuple[str, int]:
 
 _chroma_host, _chroma_port = _get_chroma_host_port()
 
-import agents.base as _agent_base
-_agent_base.VLLM_URL = f"{VLLM_URL}/v1/chat/completions"
-
 _orchestrator: Optional[Orchestrator] = None
+_orchestrator_lock = threading.Lock()
 
 
 def get_orchestrator() -> Orchestrator:
     global _orchestrator
-    if _orchestrator is None:
-        logger.info(f"Initialising Orchestrator (chroma={_chroma_host}:{_chroma_port})")
-        _orchestrator = Orchestrator(
-            chroma_host=_chroma_host,
-            chroma_port=_chroma_port,
-        )
+    with _orchestrator_lock:
+        if _orchestrator is None:
+            logger.info(f"Initialising Orchestrator (chroma={_chroma_host}:{_chroma_port})")
+            _orchestrator = Orchestrator(
+                chroma_host=_chroma_host,
+                chroma_port=_chroma_port,
+            )
     return _orchestrator
 
 
@@ -116,14 +117,7 @@ async def start_orchestration(request: OrchestrateRequest):
     job = Job(job_id=job_id, status="pending", started_at=time.time())
     _jobs[job_id] = job
 
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(
-        _executor,
-        _run_pipeline,
-        job_id,
-        request.profile,
-        request.goals,
-    )
+    _executor.submit(_run_pipeline, job_id, request.profile, request.goals)
 
     logger.info(f"Job {job_id} started — goal: {request.goals.primary_goal.value}")
     return {"job_id": job_id, "status": "pending"}

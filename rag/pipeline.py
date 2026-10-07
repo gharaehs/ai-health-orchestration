@@ -6,7 +6,7 @@ Main RAG orchestration class for the AI Health Orchestration System.
 Ties together:
   1. HealthRetriever  — queries ChromaDB with the right collection routing
   2. HealthPromptBuilder — assembles the augmented prompt
-  3. vLLM API call    — generates the structured JSON health plan
+  3. Bedrock LLM call — generates the structured JSON health plan (llm.generate_text)
 
 Usage:
     pipeline = HealthRAGPipeline()
@@ -24,8 +24,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import requests
-
+from llm import generate_text, get_config
 from rag.retriever import HealthRetriever, RetrievedChunk
 from rag.prompt_builder import HealthPromptBuilder, PromptStrategy
 
@@ -192,24 +191,18 @@ class HealthRAGPipeline:
 
     Retrieves relevant health science context from ChromaDB, assembles
     an augmented prompt, and generates a structured JSON health plan via
-    the local vLLM instance.
+    the shared Bedrock LLM client.
     """
 
     def __init__(
         self,
-        vllm_url:       str = "http://localhost:8000",
         chroma_host:    str = "localhost",
         chroma_port:    int = 8001,
-        model_name:     str = "/models/llama",
-        max_tokens:     int = 2048,
-        temperature:    float = 0.3,      # Low temp for structured JSON output
+        max_tokens:     int = 8192,
         strategy:       PromptStrategy = PromptStrategy.STRUCTURED,
         max_context_chars: int = 12_000,
     ):
-        self.vllm_url   = vllm_url
-        self.model_name = model_name
         self.max_tokens = max_tokens
-        self.temperature = temperature
         self.strategy   = strategy
 
         self.retriever = HealthRetriever(
@@ -221,7 +214,7 @@ class HealthRAGPipeline:
         )
 
         logger.info(
-            f"HealthRAGPipeline ready — model: {model_name}, "
+            f"HealthRAGPipeline ready — model: {get_config().model_id}, "
             f"strategy: {strategy.value}, max_tokens: {max_tokens}"
         )
 
@@ -283,8 +276,8 @@ class HealthRAGPipeline:
         else:
             built = self.prompt_builder.build_no_rag(query=user_request)
 
-        # ── 5. Call vLLM ──────────────────────────────────────────────────────
-        response_raw = self._call_vllm(built.system, built.user)
+        # ── 5. Call the LLM ───────────────────────────────────────────────────
+        response_raw = self._call_llm(built.system, built.user)
 
         # ── 6. Parse JSON response ────────────────────────────────────────────
         response_json, parse_error = self._parse_json(response_raw)
@@ -370,31 +363,12 @@ class HealthRAGPipeline:
             f"Respond ONLY with valid JSON matching this schema:\n{schema}"
         )
 
-    def _call_vllm(self, system_prompt: str, user_message: str) -> str:
-        """Send the augmented prompt to the local vLLM instance."""
-        payload = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system",  "content": system_prompt},
-                {"role": "user",    "content": user_message},
-            ],
-            "max_tokens":  self.max_tokens,
-            "temperature": self.temperature,
-        }
-
+    def _call_llm(self, system_prompt: str, user_message: str) -> str:
+        """Send the augmented prompt to the configured Bedrock model."""
         try:
-            resp = requests.post(
-                f"{self.vllm_url}/v1/chat/completions",
-                json=payload,
-                timeout=600,
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-        except requests.exceptions.Timeout:
-            logger.error("vLLM request timed out after 120s")
-            raise
+            return generate_text(system_prompt, user_message, max_tokens=self.max_tokens).content
         except Exception as e:
-            logger.error(f"vLLM call failed: {e}")
+            logger.error(f"LLM call failed: {e}")
             raise
 
     def _parse_json(self, raw: str) -> tuple[Optional[dict], Optional[str]]:

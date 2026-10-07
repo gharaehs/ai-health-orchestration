@@ -55,7 +55,7 @@ evidence-based defaults and note the assumption."""
 
 @dataclass
 class BuiltPrompt:
-    """The assembled prompt ready to send to vLLM."""
+    """The assembled prompt ready to send to the LLM."""
     system:    str          # System prompt
     user:      str          # User message (query + context)
     strategy:  str          # Which strategy was used
@@ -70,7 +70,7 @@ class HealthPromptBuilder:
     Usage:
         builder = HealthPromptBuilder()
         prompt  = builder.build(query, retrieved_chunks, strategy=PromptStrategy.STRUCTURED)
-        # → prompt.system, prompt.user ready for vLLM
+        # → prompt.system, prompt.user ready for the LLM
     """
 
     def __init__(self, max_context_chars: int = 12_000):
@@ -79,7 +79,7 @@ class HealthPromptBuilder:
             max_context_chars: Hard cap on total retrieved context injected into
                                the prompt. At ~4 chars/token this is ~3,000 tokens
                                of context — safe within the 8,192 context window
-                               used in vLLM, leaving room for the query and output.
+                               used by the LLM, leaving room for the query and output.
                                Llama 3.1's true limit is 128K, so this can be raised
                                aggressively if needed.
         """

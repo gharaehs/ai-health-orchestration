@@ -1,4 +1,4 @@
-VLLM_URL = "http://llm:8000"
+import os
+
 CHROMA_URL = "http://vector-db:8000"
-VLLM_MODEL = "/models/llama"
-REQUEST_TIMEOUT = 600
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "3"))

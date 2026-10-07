@@ -6,22 +6,20 @@ Agent 4: Grocery
 Aggregates all ingredients from the 7-day meal plan into a consolidated
 weekly shopping list, grouped by category.
 
-Strategy: one small LLM call per grocery category.
+Strategy: one small structured LLM call per grocery category.
   - Collect all raw ingredient strings from the 7-day meal plan
   - Pre-bucket them by keyword into 8 categories (fast, no LLM)
-  - For each non-empty category, ask the LLM to consolidate and sum quantities
-  - Each call is ~20-40 items → well within 2048 tokens
+  - Consolidate each non-empty category concurrently (small thread pool),
+    each call returning a ConsolidatedCategory via tool use
   - LLM handles fuzzy deduplication: 'chicken breast' + 'chicken, diced' → one item
-
-This avoids the token truncation problem while getting LLM-quality consolidation.
+  - One final structured call (ShoppingNotes) for practical shopping tips
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-from typing import Any
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 from agents.base import BaseAgent
 from agents.schemas import (
@@ -30,9 +28,13 @@ from agents.schemas import (
     NutritionOutput,
     GroceryOutput,
     GroceryItem,
+    ConsolidatedCategory,
+    ShoppingNotes,
 )
 
 logger = logging.getLogger(__name__)
+
+GROCERY_MAX_WORKERS = int(os.environ.get("GROCERY_MAX_WORKERS", "4"))
 
 CATEGORIES = [
     "Proteins",
@@ -107,15 +109,13 @@ class GroceryAgent(BaseAgent):
 
     AGENT_NAME     = "GroceryAgent"
     COLLECTION_KEY = "grocery"
+    OUTPUT_MODEL   = GroceryOutput
 
     def _build_query(self, profile, goals, context):
         prefs = ", ".join(goals.dietary_preferences) if goals.dietary_preferences else "balanced"
         return f"grocery shopping food storage tips {prefs} meal prep weekly planning"
 
     def _build_prompt(self, profile, goals, context, rag_context):
-        pass  # Not used — we override run()
-
-    def _parse_output(self, raw: str) -> GroceryOutput:
         pass  # Not used — we override run()
 
     # ── Override run() ────────────────────────────────────────────────────────
@@ -144,15 +144,18 @@ class GroceryAgent(BaseAgent):
             f"{list(non_empty.keys())}"
         )
 
-        # ── Step 3: LLM consolidates each category separately ────────────────
+        # ── Step 3: LLM consolidates each category concurrently ──────────────
         items_by_category: dict[str, list[GroceryItem]] = {cat: [] for cat in CATEGORIES}
 
-        for category, raw_items in non_empty.items():
-            logger.info(
-                f"[{self.AGENT_NAME}] Consolidating '{category}' ({len(raw_items)} raw items)"
-            )
-            consolidated = self._consolidate_category(category, raw_items)
-            items_by_category[category] = consolidated
+        if non_empty:
+            workers = max(1, min(GROCERY_MAX_WORKERS, len(non_empty)))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="grocery") as pool:
+                futures = {
+                    category: pool.submit(self._consolidate_category, category, raw_items)
+                    for category, raw_items in non_empty.items()
+                }
+                for category, future in futures.items():
+                    items_by_category[category] = future.result()
 
         total_items = sum(len(items) for items in items_by_category.values())
         logger.info(f"[{self.AGENT_NAME}] Total consolidated items: {total_items}")
@@ -181,12 +184,10 @@ class GroceryAgent(BaseAgent):
         Example output: [{'name': 'Chicken Breast', 'total_quantity': '350g'},
                          {'name': 'Chicken Thigh',  'total_quantity': '100g'}]
         """
+        logger.info(
+            f"[{self.AGENT_NAME}] Consolidating '{category}' ({len(raw_items)} raw items)"
+        )
         items_block = "\n".join(f"  - {item}" for item in raw_items)
-
-        schema_example = [
-            {"name": "Chicken Breast", "total_quantity": "350g", "estimated_cost_eur": 4.50},
-            {"name": "Chicken Thigh",  "total_quantity": "100g", "estimated_cost_eur": 1.20},
-        ]
 
         prompt = (
             f"You are a grocery list assistant. Consolidate this list of {category} ingredients "
@@ -197,26 +198,19 @@ class GroceryAgent(BaseAgent):
             "- Sum quantities where units match (e.g. 150g + 200g = 350g).\n"
             "- If units differ or quantity is unclear, list the larger/combined amount.\n"
             "- estimated_cost_eur: realistic European supermarket price for the total quantity.\n"
-            "- Return ONLY a JSON array (no object wrapper):\n"
-            + json.dumps(schema_example, indent=2)
+            "Submit the consolidated items by calling the provided tool."
         )
 
         try:
-            raw = self._call_llm(prompt)
-            # Extract JSON array from response
-            match = re.search(r'\[.*\]', raw, re.DOTALL)
-            if not match:
-                raise ValueError("No JSON array found in response")
-            items_data = json.loads(match.group(0))
-
+            result: ConsolidatedCategory = self._generate_with_retries(prompt, ConsolidatedCategory)
             return [
                 GroceryItem(
-                    name=item.get("name", "Unknown"),
-                    total_quantity=str(item.get("total_quantity", "1 unit")),
+                    name=item.name,
+                    total_quantity=item.total_quantity,
                     category=category,
-                    estimated_cost_eur=item.get("estimated_cost_eur"),
+                    estimated_cost_eur=item.estimated_cost_eur,
                 )
-                for item in items_data
+                for item in result.items
             ]
 
         except Exception as e:
@@ -250,15 +244,13 @@ class GroceryAgent(BaseAgent):
             f"Shopping list for a {goals.primary_goal.value.replace('_', ' ')} goal.\n"
             f"Dietary preferences: {prefs}. Allergies: {allergies}.\n\n"
             f"Categories: {'; '.join(category_summary)}\n\n"
-            "Give exactly 4 practical shopping tips as a JSON array of strings.\n"
-            'Respond with ONLY valid JSON: ["tip1", "tip2", "tip3", "tip4"]'
+            "Give exactly 4 practical shopping tips. "
+            "Submit them by calling the provided tool."
         )
 
         try:
-            raw = self._call_llm(prompt)
-            match = re.search(r'\[.*?\]', raw, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
+            result: ShoppingNotes = self._generate_with_retries(prompt, ShoppingNotes)
+            return result.notes
         except Exception as e:
             logger.warning(f"[{self.AGENT_NAME}] Shopping notes call failed: {e}")
 

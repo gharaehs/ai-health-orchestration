@@ -9,8 +9,9 @@ Execution order:
   3. TrainingAgent      → consumes lab constraints → produces weekly gym program
   4. GroceryAgent       → consumes meal plan       → produces shopping list
 
-Agents 2 and 3 run sequentially (both depend on Agent 1 output).
-Agent 4 runs after Agent 2 (depends on meal plan).
+Agents 2 and 3 run concurrently once Agent 1 finishes, each with a shallow
+copy of the context. Agent 4 starts as soon as Agent 2 succeeds (it may
+overlap with a still-running Agent 3).
 
 The Orchestrator:
   - Initialises a single shared HealthRetriever (one ChromaDB connection)
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from rag.retriever import HealthRetriever
@@ -130,74 +132,69 @@ class Orchestrator:
                 f"target calories: {lab_output.recommended_calories}"
             )
 
-        # ── Agent 2: Nutrition ────────────────────────────────────────────────
-        # Runs regardless of whether lab analysis succeeded — uses fallback
-        # calorie targets if lab_analysis is not in context
-        nutrition_output, nutrition_result = self._run_agent(
-            agent=self.nutrition_agent,
-            agent_name="NutritionAgent",
-            profile=profile,
-            goals=goals,
-            context=context,
-        )
-        result.agent_results.append(nutrition_result)
-
-        if nutrition_output is not None:
-            result.nutrition = nutrition_output
-            context["nutrition"] = nutrition_output
-            logger.info(
-                f"Nutrition plan complete — "
-                f"avg calories: {nutrition_output.avg_daily_calories} kcal/day, "
-                f"avg protein: {nutrition_output.avg_daily_protein_g}g/day"
+        # ── Agents 2 + 3: Nutrition and Training, concurrently ────────────────
+        # Both run regardless of whether lab analysis succeeded — they use
+        # fallback targets when lab_analysis is not in context. Each gets its
+        # own shallow copy of the context so concurrent writes cannot race.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent") as pool:
+            nutrition_future = pool.submit(
+                self._run_agent, self.nutrition_agent, "NutritionAgent",
+                profile, goals, dict(context),
+            )
+            training_future = pool.submit(
+                self._run_agent, self.training_agent, "TrainingAgent",
+                profile, goals, dict(context),
             )
 
-        # ── Agent 3: Training ─────────────────────────────────────────────────
-        # Runs in parallel conceptually with Nutrition (both consume lab output)
-        # but sequentially here to avoid parallel LLM calls on the T4
-        training_output, training_result = self._run_agent(
-            agent=self.training_agent,
-            agent_name="TrainingAgent",
-            profile=profile,
-            goals=goals,
-            context=context,
-        )
-        result.agent_results.append(training_result)
+            nutrition_output, nutrition_result = nutrition_future.result()
+            if nutrition_output is not None:
+                context["nutrition"] = nutrition_output
+                logger.info(
+                    f"Nutrition plan complete — "
+                    f"avg calories: {nutrition_output.avg_daily_calories} kcal/day, "
+                    f"avg protein: {nutrition_output.avg_daily_protein_g}g/day"
+                )
+
+            # ── Agent 4: Grocery ──────────────────────────────────────────────
+            # Only runs if Nutrition succeeded (needs the meal plan). It may
+            # overlap with a Training agent that is still running.
+            grocery_output, grocery_result = None, None
+            if nutrition_output is not None:
+                grocery_output, grocery_result = self._run_agent(
+                    agent=self.grocery_agent,
+                    agent_name="GroceryAgent",
+                    profile=profile,
+                    goals=goals,
+                    context=dict(context),
+                )
+            else:
+                grocery_result = AgentResult(
+                    agent="GroceryAgent",
+                    status=AgentStatus.SKIPPED,
+                    duration_s=0.0,
+                    error="Skipped: NutritionAgent did not produce output",
+                )
+                logger.warning("GroceryAgent skipped — no nutrition output available")
+
+            training_output, training_result = training_future.result()
+
+        result.nutrition = nutrition_output
+        result.training = training_output
+        result.grocery = grocery_output
+        result.agent_results.extend([nutrition_result, training_result, grocery_result])
 
         if training_output is not None:
-            result.training = training_output
             logger.info(
                 f"Training program complete — "
                 f"sessions: {len(training_output.weekly_program)}, "
                 f"rest days: {training_output.rest_days}"
             )
-
-        # ── Agent 4: Grocery ──────────────────────────────────────────────────
-        # Only runs if Nutrition succeeded (needs the meal plan)
-        if nutrition_output is not None:
-            grocery_output, grocery_result = self._run_agent(
-                agent=self.grocery_agent,
-                agent_name="GroceryAgent",
-                profile=profile,
-                goals=goals,
-                context=context,
+        if grocery_output is not None:
+            logger.info(
+                f"Grocery list complete — "
+                f"items: {grocery_output.total_items}, "
+                f"est. cost: €{grocery_output.estimated_weekly_cost_eur}"
             )
-            result.agent_results.append(grocery_result)
-
-            if grocery_output is not None:
-                result.grocery = grocery_output
-                logger.info(
-                    f"Grocery list complete — "
-                    f"items: {grocery_output.total_items}, "
-                    f"est. cost: €{grocery_output.estimated_weekly_cost_eur}"
-                )
-        else:
-            result.agent_results.append(AgentResult(
-                agent="GroceryAgent",
-                status=AgentStatus.SKIPPED,
-                duration_s=0.0,
-                error="Skipped: NutritionAgent did not produce output",
-            ))
-            logger.warning("GroceryAgent skipped — no nutrition output available")
 
         # ── Pipeline complete ─────────────────────────────────────────────────
         result.total_duration_s = round(time.time() - pipeline_start, 2)

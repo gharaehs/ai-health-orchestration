@@ -292,6 +292,24 @@ class GroceryOutput(BaseModel):
     estimated_weekly_cost_eur: Optional[float] = None
 
 
+class ConsolidatedGroceryItem(BaseModel):
+    """One deduplicated item returned by a per-category consolidation call."""
+    name:               str
+    total_quantity:     str             = Field(..., description="Summed quantity, e.g. '350g'")
+    estimated_cost_eur: Optional[float] = Field(
+        None, description="Realistic European supermarket price for the total quantity"
+    )
+
+
+class ConsolidatedCategory(BaseModel):
+    """Structured output of a single grocery category consolidation call."""
+    items:              list[ConsolidatedGroceryItem]
+
+
+class ShoppingNotes(BaseModel):
+    """Structured output of the grocery shopping-tips call."""
+    notes:              list[str] = Field(..., min_length=1, max_length=6)
+
 # ── Final Orchestration Result ────────────────────────────────────────────────
 
 class AgentStatus(str, Enum):

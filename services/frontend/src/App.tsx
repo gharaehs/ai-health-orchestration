@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useChat } from './useChat'
 import { HealthProfile, Source } from './types'
 import {
   MessageSquare, BarChart2, Database, User, Settings,
-  Send, ChevronDown, ChevronUp, Zap, BookOpen, Activity
+  Send, ChevronDown, ChevronUp, Zap, BookOpen, Activity, type LucideIcon
 } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar
@@ -117,6 +117,27 @@ export default function App() {
   const [orchResult, setOrchResult] = useState<OrchestrationResult | null>(null)
   const [orchError, setOrchError] = useState<string | null>(null)
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
+  const [health, setHealth] = useState<ApiHealth | null>(null)
+  const [healthReachable, setHealthReachable] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch('/api/health')
+        setHealth(await res.json())
+        setHealthReachable(true)
+      } catch {
+        setHealthReachable(false)
+      }
+    }
+    load()
+    const id = setInterval(load, 60_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const llm = health?.services?.llm
+  const chroma = health?.services?.chromadb
+  const modelId = llm?.model ?? 'Claude Opus 5.5'
 
   const { result, loading, error, sendQuery } = useChat()
 
@@ -190,14 +211,14 @@ export default function App() {
         }
         // status is 'pending' or 'running' — keep polling
       }
-    } catch (e: any) {
-      setOrchError(e.message)
+    } catch (e) {
+      setOrchError(e instanceof Error ? e.message : String(e))
     } finally {
       setOrchLoading(false)
     }
   }
 
-  const navItems: Array<{ id: View; icon: any; label: string }> = [
+  const navItems: Array<{ id: View; icon: LucideIcon; label: string }> = [
     { id: 'chat',        icon: MessageSquare, label: 'Chat & Compare' },
     { id: 'orchestrate', icon: Activity,      label: 'Orchestrate' },
     { id: 'analytics',   icon: BarChart2,     label: 'Analytics' },
@@ -232,9 +253,9 @@ export default function App() {
             ))}
           </nav>
           <div className="p-3 border-t border-gray-800 space-y-1.5">
-            <StatusDot label="vLLM :8000" />
-            <StatusDot label="ChromaDB :8001" />
-            <StatusDot label="API :8002" />
+            <StatusDot label="Bedrock LLM" status={llm?.status} title={llm?.detail ?? modelId} />
+            <StatusDot label="ChromaDB :8001" status={chroma?.status} />
+            <StatusDot label="API :8002" status={healthReachable === null ? undefined : healthReachable ? 'ok' : 'error'} />
           </div>
         </div>
 
@@ -245,8 +266,8 @@ export default function App() {
             {navItems.find(n => n.id === view)?.label}
           </span>
             <div className="flex items-center gap-2">
-              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">Llama 3.1 8B</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900 text-purple-300">LoRA: health-v1</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">Claude Opus 5.5</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900 text-purple-300">Amazon Bedrock</span>
             </div>
           </div>
 
@@ -295,7 +316,7 @@ export default function App() {
                   {loading && (
                       <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 text-center text-gray-500">
                         <div className="animate-pulse">Running parallel RAG + base calls…</div>
-                        <div className="text-xs mt-1 text-gray-600">This takes 20–60s on T4</div>
+                        <div className="text-xs mt-1 text-gray-600">Usually completes within a minute</div>
                       </div>
                   )}
                   {result && (
@@ -368,8 +389,8 @@ export default function App() {
                       <div>
                         <div className="text-sm font-medium text-white mb-1">Multi-Agent Pipeline</div>
                         <div className="text-xs text-gray-500">
-                          Runs 4 agents sequentially: Lab Analysis → Nutrition → Training → Grocery.
-                          Uses health profile from the Profile tab. Takes ~7 min on T4.
+                          Runs Lab Analysis first, then Nutrition and Training in parallel, then Grocery.
+                          Uses health profile from the Profile tab. Takes a few minutes.
                         </div>
                       </div>
                       <button
@@ -426,8 +447,8 @@ export default function App() {
                   {orchLoading && (
                       <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center text-gray-500">
                         <div className="animate-pulse text-base mb-2">Pipeline running…</div>
-                        <div className="text-xs text-gray-600">Each agent calls vLLM with RAG-augmented prompts</div>
-                        <div className="text-xs text-gray-700 mt-1">~7 minutes on T4 · check server logs for progress</div>
+                        <div className="text-xs text-gray-600">Each agent calls Claude Opus on Bedrock with RAG-augmented prompts</div>
+                        <div className="text-xs text-gray-700 mt-1">Usually a few minutes · check server logs for progress</div>
                       </div>
                   )}
 
@@ -740,13 +761,11 @@ export default function App() {
                   </div>
                   <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-2">
                     <div className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-3">System info</div>
-                    <InfoRow label="Model" value="meta-llama/Meta-Llama-3.1-8B-Instruct" />
-                    <InfoRow label="Quantization" value="BitsAndBytes 4-bit (NF4)" />
-                    <InfoRow label="Context window" value="16,384 tokens" />
-                    <InfoRow label="LoRA adapter" value="health-v1 (rank=16, alpha=32)" />
+                    <InfoRow label="Model" value={modelId} />
+                    <InfoRow label="Provider" value="Amazon Bedrock (Converse API)" />
+                    <InfoRow label="LLM status" value={llm ? llm.status : 'unknown'} />
                     <InfoRow label="Embedding model" value="all-MiniLM-L6-v2 (CPU)" />
                     <InfoRow label="Vector DB" value="ChromaDB 1.5.8 — 13,349 docs" />
-                    <InfoRow label="GPU" value="NVIDIA Tesla T4 — 16 GB VRAM" />
                   </div>
                 </div>
             )}
@@ -785,10 +804,11 @@ function AgentPanel({ title, icon, expanded, onToggle, summary, children }: {
   )
 }
 
-function StatusDot({ label }: { label: string }) {
+function StatusDot({ label, status, title }: { label: string; status?: string; title?: string }) {
+  const color = status === 'ok' ? 'bg-green-500' : status ? 'bg-red-500' : 'bg-gray-600'
   return (
-      <div className="flex items-center gap-1.5 text-xs text-gray-500">
-        <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+      <div className="flex items-center gap-1.5 text-xs text-gray-500" title={title}>
+        <span className={`w-1.5 h-1.5 rounded-full ${color} flex-shrink-0`} />
         {label}
       </div>
   )
@@ -842,6 +862,14 @@ function ProfileField({ label, value, onChange }:
         />
       </div>
   )
+}
+
+interface ApiHealth {
+  status: string
+  services: {
+    llm?: { status: string; model?: string; detail?: string }
+    chromadb?: { status: string; collections?: number; detail?: string }
+  }
 }
 
 function InfoRow({ label, value }: { label: string; value: string }) {

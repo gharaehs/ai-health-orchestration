@@ -1,13 +1,8 @@
-models/*
-!models/.gitkeep
 data/chroma/
 .env
 __pycache__/
 *.pyc
 .DS_Store
-*.gguf
-*.bin
-*.safetensors
 data/corpus/
 
 # Corpus data files (PDFs, CSVs) - large binary files, not version controlled
@@ -16,4 +11,3 @@ data/corpus/
 data/corpus/**
 !data/corpus/**/.gitkeep
 .idea/
-training/evaluation_results.json

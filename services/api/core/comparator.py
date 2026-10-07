@@ -2,7 +2,8 @@ import asyncio
 import time
 import httpx
 from sentence_transformers import SentenceTransformer
-from core.config import VLLM_URL, CHROMA_URL, VLLM_MODEL, REQUEST_TIMEOUT
+from llm import generate_text
+from core.config import CHROMA_URL
 from core.metrics import compute_grounding_score, count_tokens_approx
 
 _embedder = None
@@ -82,28 +83,20 @@ async def retrieve_chunks(query: str, collections: list[str],
     return chunks
 
 
-async def call_vllm(messages: list[dict], label: str) -> dict:
+COMPARISON_MAX_TOKENS = 1024
+
+
+async def call_llm(system: str, user: str, label: str) -> dict:
     start = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            r = await client.post(f"{VLLM_URL}/v1/chat/completions", json={
-                "model":       VLLM_MODEL,
-                "messages":    messages,
-                "max_tokens":  1024,
-                "temperature": 0.3,
-            })
-            data    = r.json()
-            content = data["choices"][0]["message"]["content"]
-            usage   = data.get("usage", {})
-            return {
-                "content":           content,
-                "latency_s":         round(time.perf_counter() - start, 2),
-                "prompt_tokens":     usage.get("prompt_tokens",
-                                               count_tokens_approx(str(messages))),
-                "completion_tokens": usage.get("completion_tokens",
-                                               count_tokens_approx(content)),
-                "error": None,
-            }
+        resp = await asyncio.to_thread(generate_text, system, user, COMPARISON_MAX_TOKENS)
+        return {
+            "content":           resp.content,
+            "latency_s":         round(time.perf_counter() - start, 2),
+            "prompt_tokens":     resp.prompt_tokens or count_tokens_approx(system + user),
+            "completion_tokens": resp.completion_tokens or count_tokens_approx(resp.content),
+            "error": None,
+        }
     except Exception as e:
         return {
             "content": "", "latency_s": round(time.perf_counter() - start, 2),
@@ -119,18 +112,14 @@ async def run_comparison(query: str, health_profile: dict,
         "Provide specific, evidence-based recommendations. "
         "Be concise and structured."
     )
-    user_content  = f"Health profile: {health_profile}\n\nRequest: {query}"
-    base_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": user_content},
-    ]
+    base_user = f"Health profile: {health_profile}\n\nRequest: {query}"
 
     collections     = COLLECTION_MAP.get(query_type, COLLECTION_MAP["general"])
     retrieval_start = time.perf_counter()
 
     chunks, base_result = await asyncio.gather(
         retrieve_chunks(query, collections, top_k),
-        call_vllm(base_messages, "base"),
+        call_llm(system_prompt, base_user, "base"),
     )
     retrieval_latency = round(time.perf_counter() - retrieval_start, 2)
 
@@ -145,16 +134,13 @@ async def run_comparison(query: str, health_profile: dict,
             context_blocks.append(block)
 
     rag_context  = "\n\n".join(context_blocks)
-    rag_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": (
-            f"{rag_context}\n\n"
-            f"Health profile: {health_profile}\n\n"
-            f"Request: {query}"
-        )},
-    ]
+    rag_user = (
+        f"{rag_context}\n\n"
+        f"Health profile: {health_profile}\n\n"
+        f"Request: {query}"
+    )
 
-    rag_result = await call_vllm(rag_messages, "rag")
+    rag_result = await call_llm(system_prompt, rag_user, "rag")
     grounding  = compute_grounding_score(rag_result["content"], chunks)
     base_score = compute_grounding_score(base_result["content"], chunks)
 

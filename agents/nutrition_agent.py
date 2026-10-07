@@ -10,9 +10,9 @@ recipes retrieved from two ChromaDB collections:
 
 Receives dietary_constraints and recommended_calories from LabAnalysisOutput.
 
-Strategy: generates in TWO half-week calls (Mon-Thu, Fri-Sun) to avoid
-hitting the 2048 token limit with a full 7-day JSON in one response.
-Results are merged into a full NutritionOutput.
+Strategy: generates the full Monday–Sunday plan in ONE structured
+(tool-use) request. Weekly averages are recomputed in code from the
+validated day totals.
 
 Module 6 (MCP): retrieval is routed through the mcp-rag server instead of
 calling HealthRetriever directly — see _retrieve()/_mcp_retrieve() below.
@@ -21,7 +21,6 @@ calling HealthRetriever directly — see _retrieve()/_mcp_retrieve() below.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from typing import Any
@@ -30,6 +29,7 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from agents.base import BaseAgent
+from llm import StructuredOutputError
 from agents.schemas import (
     HealthProfile,
     UserGoals,
@@ -41,50 +41,16 @@ logger = logging.getLogger(__name__)
 
 MCP_RAG_URL = os.environ.get("MCP_RAG_URL", "http://mcp-rag:8004/mcp")
 
-WEEK_HALF_1 = ["Monday", "Tuesday", "Wednesday", "Thursday"]
-WEEK_HALF_2 = ["Friday", "Saturday", "Sunday"]
+WEEK_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
 class NutritionAgent(BaseAgent):
 
     AGENT_NAME     = "NutritionAgent"
     COLLECTION_KEY = "meal_plan"   # → nutrition_guidelines + food_and_recipes
-
-    # ── Override base run() to split into two LLM calls ──────────────────────
-
-    def run(self, profile, goals, context=None):
-        """
-        Generate the meal plan in two halves to stay within token limits:
-          Call 1: Monday–Thursday (4 days)
-          Call 2: Friday–Sunday   (3 days)
-        Then merge into a full 7-day NutritionOutput.
-        """
-        context = context or {}
-        logger.info(f"[{self.AGENT_NAME}] Starting (split-generation mode)")
-
-        rag_context  = self._retrieve(profile, goals, context)
-        lab: LabAnalysisOutput | None = context.get("lab_analysis")
-
-        target_calories = self._get_target_calories(goals, lab)
-        constraints_block = self._get_constraints_block(lab)
-
-        # ── Half 1: Mon–Thu ───────────────────────────────────────────────────
-        logger.info(f"[{self.AGENT_NAME}] Generating Mon–Thu")
-        raw1 = self._call_llm(
-            self._build_half_prompt(profile, goals, rag_context,
-                                    constraints_block, target_calories, WEEK_HALF_1)
-        )
-
-        # ── Half 2: Fri–Sun ───────────────────────────────────────────────────
-        logger.info(f"[{self.AGENT_NAME}] Generating Fri–Sun")
-        raw2 = self._call_llm(
-            self._build_half_prompt(profile, goals, rag_context,
-                                    constraints_block, target_calories, WEEK_HALF_2)
-        )
-
-        result = self._merge_and_parse(raw1, raw2, target_calories, goals, lab)
-        logger.info(f"[{self.AGENT_NAME}] Completed successfully")
-        return result
+    OUTPUT_MODEL   = NutritionOutput
+    # A full week of meals in one tool call is a large output.
+    MAX_TOKENS_OVERRIDE = int(os.environ.get("NUTRITION_MAX_TOKENS", "16000"))
 
     # ── Abstract method implementations ──────────────────────────────────────
 
@@ -140,28 +106,57 @@ class NutritionAgent(BaseAgent):
         )
         return context_str
 
-    async def _mcp_retrieve(self, query: str) -> list[dict]:
-        async with streamablehttp_client(MCP_RAG_URL) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(
-                    "retrieve_context",
-                    {
-                        "query_text": query,
-                        "query_type": self.COLLECTION_KEY,
-                        "n_results_per_collection": 6,
-                        "max_distance": 0.8,
-                    },
-                )
-                return json.loads(result.content[0].text)["result"]
-
     def _build_prompt(self, profile, goals, context, rag_context):
-        # Not used — we use _build_half_prompt instead
-        pass
+        lab: LabAnalysisOutput | None = context.get("lab_analysis")
+        target_calories = self._get_target_calories(goals, lab)
+        constraints_block = self._get_constraints_block(lab)
+        days_str = ", ".join(WEEK_DAYS)
 
-    def _parse_output(self, raw: str) -> NutritionOutput:
-        # Not used — we use _merge_and_parse instead
-        pass
+        parts = [
+            rag_context,
+            "",
+            self._format_profile(profile),
+            "",
+            self._format_goals(goals),
+            "",
+            "=== LAB-DERIVED DIETARY CONSTRAINTS (MUST FOLLOW) ===",
+            constraints_block,
+            "=== END CONSTRAINTS ===",
+            "",
+            "=== TASK ===",
+            "Generate a complete 7-day meal plan.",
+            f"Caloric target: {target_calories} kcal/day",
+            "",
+            "Rules:",
+            f"- weekly_plan must contain exactly 7 entries, in order: {days_str}.",
+            "- Each day must have exactly 3 meals: Breakfast, Lunch, Dinner.",
+            "- Day totals (calories, protein, carbs, fat) must equal the sum of that day's meals.",
+            "- Respect all dietary constraints and profile allergies.",
+            "- Ingredients must include quantity and unit (e.g. '150g chicken breast').",
+            "- Vary recipes — do not repeat the same recipe twice.",
+            "- Keep instructions brief (1-2 sentences).",
+            "- caloric_strategy: explain the caloric target and macro split chosen.",
+            "- constraint_adherence: explain how each dietary constraint was addressed.",
+            "- sources_used: list source names from the retrieved guidelines.",
+            "",
+            "Submit the plan by calling the provided tool.",
+        ]
+        return "\n".join(parts)
+
+    def _parse_output(self, output: NutritionOutput, profile, goals, context) -> NutritionOutput:
+        days = [d.day.strip().capitalize() for d in output.weekly_plan]
+        if days != WEEK_DAYS:
+            raise StructuredOutputError(
+                f"weekly_plan days must be {WEEK_DAYS} in order, got {days}"
+            )
+
+        plan = output.weekly_plan
+        return output.model_copy(update={
+            "avg_daily_calories":  sum(d.total_calories for d in plan) // 7,
+            "avg_daily_protein_g": round(sum(d.total_protein_g for d in plan) / 7, 1),
+            "avg_daily_carbs_g":   round(sum(d.total_carbs_g for d in plan) / 7, 1),
+            "avg_daily_fat_g":     round(sum(d.total_fat_g for d in plan) / 7, 1),
+        })
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
@@ -176,129 +171,17 @@ class NutritionAgent(BaseAgent):
             return "\n".join(f"  • {c}" for c in lab.dietary_constraints)
         return "  • No specific lab-derived constraints. Follow goal-appropriate guidelines."
 
-    def _build_half_prompt(self, profile, goals, rag_context,
-                            constraints_block, target_calories, days):
-        """Build a prompt for a subset of days only."""
-        days_str = ", ".join(days)
-        n_days   = len(days)
-
-        schema_example = {
-            "days": [
-                {
-                    "day": days[0],
-                    "meals": [
-                        {
-                            "name": "Breakfast",
-                            "recipe_name": "Overnight Oats with Berries",
-                            "ingredients": ["80g rolled oats", "200ml skimmed milk", "100g mixed berries"],
-                            "instructions": "Combine oats and milk overnight. Top with berries.",
-                            "calories_kcal": 420,
-                            "protein_g": 18.0,
-                            "carbs_g": 68.0,
-                            "fat_g": 6.0,
-                            "notes": "High soluble fibre"
-                        }
-                    ],
-                    "total_calories": target_calories,
-                    "total_protein_g": 150.0,
-                    "total_carbs_g": 200.0,
-                    "total_fat_g": 65.0
-                }
-            ]
-        }
-
-        parts = [
-            rag_context,
-            "",
-            self._format_profile(profile),
-            "",
-            self._format_goals(goals),
-            "",
-            "=== LAB-DERIVED DIETARY CONSTRAINTS (MUST FOLLOW) ===",
-            constraints_block,
-            "=== END CONSTRAINTS ===",
-            "",
-            "=== TASK ===",
-            f"Generate a meal plan for EXACTLY these {n_days} days only: {days_str}",
-            f"Caloric target: {target_calories} kcal/day",
-            "",
-            "Rules:",
-            f"- Generate exactly {n_days} day entries. Days: {days_str}",
-            "- Each day must have exactly 3 meals: Breakfast, Lunch, Dinner.",
-            "- Respect all dietary constraints and profile allergies.",
-            "- Ingredients must include quantity and unit (e.g. '150g chicken breast').",
-            "- Vary recipes — do not repeat the same recipe twice.",
-            "- Keep instructions brief (1-2 sentences).",
-            "",
-            f"Respond with ONLY valid JSON with a 'days' array of exactly {n_days} entries:",
-            json.dumps(schema_example, indent=2),
-        ]
-        return "\n".join(parts)
-
-    def _merge_and_parse(self, raw1, raw2, target_calories, goals, lab) -> NutritionOutput:
-        """Merge two half-week responses into a full NutritionOutput."""
-        data1 = self._extract_json(raw1)
-        data2 = self._extract_json(raw2)
-
-        days1 = data1.get("days", [])
-        days2 = data2.get("days", [])
-        all_days = days1 + days2
-
-        logger.info(f"[{self.AGENT_NAME}] Merging: {len(days1)} + {len(days2)} = {len(all_days)} days")
-
-        if len(all_days) < 7:
-            raise ValueError(
-                f"Expected 7 days total, got {len(all_days)} "
-                f"({len(days1)} from first call, {len(days2)} from second)"
-            )
-
-        # Build weekly_plan in the DayPlan schema format
-        weekly_plan = []
-        for day_data in all_days[:7]:
-            weekly_plan.append({
-                "day":             day_data["day"],
-                "meals":           day_data["meals"],
-                "total_calories":  day_data.get("total_calories", target_calories),
-                "total_protein_g": day_data.get("total_protein_g", 0.0),
-                "total_carbs_g":   day_data.get("total_carbs_g", 0.0),
-                "total_fat_g":     day_data.get("total_fat_g", 0.0),
-            })
-
-        avg_cal  = sum(d["total_calories"]  for d in weekly_plan) // 7
-        avg_prot = round(sum(d["total_protein_g"] for d in weekly_plan) / 7, 1)
-        avg_carb = round(sum(d["total_carbs_g"]   for d in weekly_plan) / 7, 1)
-        avg_fat  = round(sum(d["total_fat_g"]     for d in weekly_plan) / 7, 1)
-
-        goal_label = goals.primary_goal.value.replace("_", " ")
-        constraint_notes = []
-        if lab and lab.dietary_constraints:
-            constraint_notes = [f"Addressed: {c}" for c in lab.dietary_constraints]
-
-        return NutritionOutput(
-            weekly_plan=weekly_plan,
-            avg_daily_calories=avg_cal,
-            avg_daily_protein_g=avg_prot,
-            avg_daily_carbs_g=avg_carb,
-            avg_daily_fat_g=avg_fat,
-            caloric_strategy=(
-                f"Target {target_calories} kcal/day calibrated for {goal_label}. "
-                f"Generated in two half-week batches and merged."
-            ),
-            constraint_adherence=constraint_notes,
-            sources_used=[],
-        )
-
     async def _mcp_retrieve(self, query: str) -> list[dict]:
-            async with streamablehttp_client(MCP_RAG_URL) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(
-                        "retrieve_context",
-                        {
-                            "query_text": query,
-                            "query_type": self.COLLECTION_KEY,
-                            "n_results_per_collection": 6,
-                            "max_distance": 0.8,
-                        },
-                    )
-                    return result.structuredContent["result"]
+        async with streamablehttp_client(MCP_RAG_URL) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "retrieve_context",
+                    {
+                        "query_text": query,
+                        "query_type": self.COLLECTION_KEY,
+                        "n_results_per_collection": 6,
+                        "max_distance": 0.8,
+                    },
+                )
+                return result.structuredContent["result"]

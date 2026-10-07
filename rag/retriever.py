@@ -58,7 +58,7 @@ class HealthRetriever:
     Mirrors the ingestion setup exactly:
     - Same embedding model: all-MiniLM-L6-v2
     - Same distance metric: cosine (ChromaDB default)
-    - Same CPU execution (preserves T4 VRAM for vLLM)
+    - Same CPU execution as the API service
     """
 
     def __init__(
