@@ -1,50 +1,104 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+Sync Impact Report
+- Version change: (unversioned template) → 1.0.0
+- Modified principles: all placeholders replaced (initial ratification)
+  - [PRINCIPLE_1_NAME] → I. Schema-Contracted Agent Communication
+  - [PRINCIPLE_2_NAME] → II. MCP-Mediated Retrieval
+  - [PRINCIPLE_3_NAME] → III. Containerized Services
+  - [PRINCIPLE_4_NAME] → IV. Artifacts Stay Out of Git
+  - [PRINCIPLE_5_NAME] → V. Validated Structured Output
+- Added sections: Architecture Constraints, Development Workflow & Quality Gates, Governance
+- Removed sections: none
+- Templates requiring updates: none (templates read the constitution at runtime)
+- Deferred TODOs: none
+-->
+
+# AI Health Orchestration Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Schema-Contracted Agent Communication
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+- Agents MUST exchange data exclusively through Pydantic models defined in `agents/schemas.py`.
+- Agents MUST NOT pass untyped dicts, raw strings, or ad-hoc structures to one another.
+- New inter-agent data shapes MUST be added to `agents/schemas.py` before any agent uses them.
+- Schema changes that break existing fields MUST update every producer and consumer in the
+  same change.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+Rationale: a single typed contract surface keeps the orchestrator and agents decoupled and makes
+inter-agent breakage detectable at validation time rather than at runtime.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### II. MCP-Mediated Retrieval
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+- Agents MUST retrieve context only through the MCP RAG server.
+- Agents MUST NOT import a ChromaDB client, open the vector store, or query collections directly.
+- Direct ChromaDB access is permitted only inside the RAG/MCP server and ingestion tooling
+  (e.g. `rag/`, `scripts/ingest.py`).
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+Rationale: one retrieval boundary allows the vector store, embedding model, or retrieval strategy
+to change without touching agent code, and keeps grounding behavior observable in one place.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### III. Containerized Services
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+- Every runtime service (LLM server, vector store, MCP server, API, frontend, and any new
+  service) MUST run as a container defined in `docker-compose.yml`.
+- A service that cannot be started via `docker compose` is not considered deployed.
+- Service-to-service addresses MUST use compose service names and configuration from environment
+  variables, not hard-coded host addresses.
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+Rationale: a single compose definition makes the system reproducible on a fresh server and
+guarantees parity between development and deployment.
+
+### IV. Artifacts Stay Out of Git
+
+- Model weights (e.g. `*.gguf`, `*.safetensors`, `*.bin`, LoRA adapters), vector data
+  (`data/chroma/`), and corpus files (`data/corpus/`) MUST NOT be committed.
+- `.gitignore` MUST cover these paths; only placeholder files such as `.gitkeep` may be tracked.
+- Such artifacts MUST be reproducible from versioned scripts (e.g. `scripts/download_model.sh`,
+  `scripts/ingest.py`).
+- Secrets (`.env`, API keys) MUST NOT be committed.
+
+Rationale: large binaries bloat history and corpus licensing varies; reproducible scripts keep
+the repository lightweight and portable.
+
+### V. Validated Structured Output
+
+- Every agent output MUST be structured JSON that validates against that agent's Pydantic schema
+  in `agents/schemas.py`.
+- Outputs that fail validation MUST be rejected or retried; they MUST NOT be passed downstream or
+  returned to clients as success.
+- Free-form LLM text MUST NOT be exposed as an agent's final output.
+
+Rationale: downstream automation (grocery aggregation, dashboards, API clients) depends on
+predictable, machine-readable results.
+
+## Architecture Constraints
+
+- Data flow: client → API service → orchestrator → agents → MCP RAG server → vector store.
+  Layers MUST NOT be skipped.
+- Agent outputs grounded in retrieved context SHOULD carry the source references returned by the
+  MCP RAG server.
+- New agents MUST subclass the shared base in `agents/base.py` and declare their input/output
+  schemas.
+
+## Development Workflow & Quality Gates
+
+- Every pull request MUST be reviewed against the Core Principles; violations block merge unless
+  justified in the plan's Complexity Tracking section.
+- Changes to `agents/schemas.py` MUST include updates to affected agents and orchestration tests
+  (e.g. `scripts/test_orchestration.py`).
+- Changes to retrieval MUST be verified via the RAG tests/evaluation (`scripts/test_rag.py`,
+  `rag/evaluate.py`).
+- The stack MUST start cleanly with `docker compose up` before a feature is considered done.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+- This constitution supersedes conflicting practices, docs, and conventions in this repository.
+- Amendments MUST be made via `/speckit-constitution`, documented in a pull request, and include
+  a migration note for any code that becomes non-compliant.
+- Versioning follows semantic versioning: MAJOR for removed or redefined principles, MINOR for new
+  principles or materially expanded guidance, PATCH for clarifications and wording fixes.
+- Compliance is checked at plan time (Constitution Check in `/speckit-plan`) and at code review.
+- Runtime development guidance lives in `README.md`.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2026-10-07 | **Last Amended**: 2026-10-07
