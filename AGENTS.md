@@ -1,8 +1,7 @@
 # AI Health Orchestration
 
 Multi-agent system: health profile + goals -> meal plan, gym program,
-grocery list. Claude Opus 5.5 via Amazon Bedrock (or optional local
-vLLM) + RAG (ChromaDB) + MCP server + FastAPI + React/Vite, run with
+grocery list. Claude Opus 5.5 + RAG (ChromaDB) + MCP server + FastAPI + React/Vite, run with
 Docker Compose.
 
 ## Layout
