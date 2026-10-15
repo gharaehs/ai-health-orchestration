@@ -13,8 +13,9 @@ Strategy: one small LLM call per grocery category.
   - Each call is ~20-40 items and returns a schema-constrained ConsolidatedItems
   - LLM handles fuzzy deduplication: 'chicken breast' + 'chicken, diced' → one item
 
-A failed or truncated category call falls back to the raw items for that
-category; a failed shopping-tips call falls back to default tips.
+A category call that is truncated or fails validation (after retries) falls back
+to the raw items for that category, and the shopping-tips call falls back to
+default tips the same way. Upstream API errors and refusals propagate.
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ import logging
 from typing import Any
 
 from agents.base import BaseAgent
-from agents.llm_client import LLMConfigError
+from pydantic import ValidationError
+
+from agents.llm_client import LLMTruncatedError
 from agents.schemas import (
     HealthProfile,
     UserGoals,
@@ -203,7 +206,7 @@ class GroceryAgent(BaseAgent):
         )
 
         try:
-            output = self._call_llm(prompt, ConsolidatedItems, self.MAX_TOKENS)
+            output = self._generate(prompt, ConsolidatedItems, self.MAX_TOKENS)
             return [
                 GroceryItem(
                     name=item.name,
@@ -214,9 +217,7 @@ class GroceryAgent(BaseAgent):
                 for item in output.items
             ]
 
-        except LLMConfigError:
-            raise
-        except Exception as e:
+        except (LLMTruncatedError, ValidationError) as e:
             logger.warning(
                 f"[{self.AGENT_NAME}] Consolidation failed for '{category}': {e}. "
                 f"Using raw items as fallback."
@@ -251,12 +252,10 @@ class GroceryAgent(BaseAgent):
         )
 
         try:
-            output = self._call_llm(prompt, ShoppingTips, self.MAX_TOKENS)
+            output = self._generate(prompt, ShoppingTips, self.MAX_TOKENS)
             if output.tips:
                 return output.tips
-        except LLMConfigError:
-            raise
-        except Exception as e:
+        except (LLMTruncatedError, ValidationError) as e:
             logger.warning(f"[{self.AGENT_NAME}] Shopping notes call failed: {e}")
 
         return list(DEFAULT_SHOPPING_TIPS)

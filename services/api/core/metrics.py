@@ -29,8 +29,3 @@ def compute_grounding_score(response_text: str, chunks: list[dict]) -> float:
 
     overlap = response_words & corpus_words
     return round(len(overlap) / len(response_words), 3)
-
-
-def count_tokens_approx(text: str) -> int:
-    """Approximate token count: ~4 chars per token."""
-    return len(text) // 4

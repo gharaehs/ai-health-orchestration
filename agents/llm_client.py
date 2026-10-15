@@ -172,6 +172,13 @@ def _log_error(kind: str, err: Exception) -> None:
     logger.error(f"LLM {kind} failed: {type(err).__name__}: {_redact(str(err))}")
 
 
+def _finish(kind: str, message: Any, t0: float, max_tokens: int) -> str:
+    """Shared post-call steps: log, reject truncation/refusal, return the text."""
+    _log_done(kind, message, t0)
+    _check_stop(message, max_tokens)
+    return _text(message)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def generate(system: str, user: str, *, schema: type[ModelT], max_tokens: int) -> ModelT:
@@ -190,9 +197,9 @@ def generate(system: str, user: str, *, schema: type[ModelT], max_tokens: int) -
     except Exception as e:
         _log_error("generate", e)
         raise
-    _log_done(f"generate[{schema.__name__}]", message, t0)
-    _check_stop(message, max_tokens)
-    return schema.model_validate_json(_text(message))
+    return schema.model_validate_json(
+        _finish(f"generate[{schema.__name__}]", message, t0, max_tokens)
+    )
 
 
 def complete(system: str, user: str, *, max_tokens: int) -> str:
@@ -206,9 +213,7 @@ def complete(system: str, user: str, *, max_tokens: int) -> str:
     except Exception as e:
         _log_error("complete", e)
         raise
-    _log_done("complete", message, t0)
-    _check_stop(message, max_tokens)
-    return _text(message)
+    return _finish("complete", message, t0, max_tokens)
 
 
 async def acomplete(system: str, user: str, *, max_tokens: int) -> tuple[str, Usage]:
@@ -222,9 +227,7 @@ async def acomplete(system: str, user: str, *, max_tokens: int) -> tuple[str, Us
     except Exception as e:
         _log_error("acomplete", e)
         raise
-    _log_done("acomplete", message, t0)
-    _check_stop(message, max_tokens)
-    return _text(message), _usage(message)
+    return _finish("acomplete", message, t0, max_tokens), _usage(message)
 
 
 def check_health() -> dict:

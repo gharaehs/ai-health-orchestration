@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useChat } from './useChat'
 import { HealthProfile, Source } from './types'
 import {
@@ -118,6 +118,18 @@ export default function App() {
   const [orchResult, setOrchResult] = useState<OrchestrationResult | null>(null)
   const [orchError, setOrchError] = useState<string | null>(null)
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
+
+  // Model actually configured on the server (ANTHROPIC_MODEL or its default)
+  const [llmModel, setLlmModel] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/health')
+        .then(res => res.json())
+        .then(data => setLlmModel(data?.services?.llm?.model ?? null))
+        .catch(() => setLlmModel(null))
+  }, [])
+
+  const modelLabel = llmModel ?? 'model unavailable'
 
   const { result, loading, error, sendQuery } = useChat()
 
@@ -246,7 +258,7 @@ export default function App() {
             {navItems.find(n => n.id === view)?.label}
           </span>
             <div className="flex items-center gap-2">
-              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">Claude Opus 5.5</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">{modelLabel}</span>
             </div>
           </div>
 
@@ -368,7 +380,7 @@ export default function App() {
                       <div>
                         <div className="text-sm font-medium text-white mb-1">Multi-Agent Pipeline</div>
                         <div className="text-xs text-gray-500">
-                          Runs 4 agents sequentially: Lab Analysis → Nutrition → Training → Grocery.
+                          Runs Lab Analysis first, then Nutrition and Training in parallel, then Grocery.
                           Uses health profile from the Profile tab. Takes a few minutes.
                         </div>
                       </div>
@@ -740,7 +752,7 @@ export default function App() {
                   </div>
                   <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-2">
                     <div className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-3">System info</div>
-                    <InfoRow label="Model" value="Claude Opus 5.5 (Anthropic API)" />
+                    <InfoRow label="Model" value={`${modelLabel} (Anthropic API)`} />
                     <InfoRow label="Embedding model" value="all-MiniLM-L6-v2 (CPU)" />
                     <InfoRow label="Vector DB" value="ChromaDB 1.5.8 — 13,349 docs" />
                   </div>

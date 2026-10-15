@@ -1,9 +1,11 @@
+import anthropic
+import httpx2
 import pytest
 
 from agents import llm_client
 from agents.grocery_agent import DEFAULT_SHOPPING_TIPS, GroceryAgent
 from agents.lab_analysis_agent import LabAnalysisAgent
-from agents.llm_client import LLMConfigError, LLMTruncatedError
+from agents.llm_client import LLMConfigError, LLMRefusalError, LLMTruncatedError
 from agents.nutrition_agent import NutritionAgent
 from agents.schemas import (
     ConsolidatedItems,
@@ -133,20 +135,95 @@ def test_grocery_success_path():
     assert all(c["max_tokens"] == 2048 for c in fake.calls)
 
 
+def _api_error(status: int, cls):
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(status, request=request)
+    return cls(f"HTTP {status}", response=response, body=None)
+
+
+def _always(reply):
+    return lambda kwargs: reply
+
+
 @pytest.mark.parametrize("failure", [
     message('{"items": [', stop_reason="max_tokens"),
-    RuntimeError("API overloaded"),
     {"items": "not-a-list"},
-])
-def test_grocery_falls_back_when_calls_fail(failure):
+], ids=["truncated", "validation"])
+def test_grocery_falls_back_on_truncation_or_validation(failure):
     nutrition = _nutrition(["150g chicken breast"])
-    fake = FakeClient(failure, failure)
+    fake = FakeClient(*[_always(failure)] * 4)
     llm_client.set_clients(sync=fake)
     out = GroceryAgent().run(samples.profile(), samples.goals(), {"nutrition": nutrition})
     proteins = out.items_by_category["Proteins"]
     assert proteins[0].name == "150g chicken breast"
     assert proteins[0].total_quantity == "see meal plan"
     assert out.shopping_notes == list(DEFAULT_SHOPPING_TIPS)
+
+
+def test_grocery_does_not_retry_truncation():
+    nutrition = _nutrition(["150g chicken breast"])
+    truncated = message('{"items": [', stop_reason="max_tokens")
+    fake = FakeClient(truncated, truncated)
+    llm_client.set_clients(sync=fake)
+    GroceryAgent().run(samples.profile(), samples.goals(), {"nutrition": nutrition})
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.parametrize("failure", [
+    _api_error(401, anthropic.AuthenticationError),
+    _api_error(429, anthropic.RateLimitError),
+    _api_error(529, anthropic.InternalServerError),
+    anthropic.APITimeoutError(request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")),
+], ids=["auth", "rate-limit", "overloaded", "timeout"])
+def test_grocery_propagates_upstream_errors(failure):
+    nutrition = _nutrition(["150g chicken breast"])
+    fake = FakeClient(failure)
+    llm_client.set_clients(sync=fake)
+    with pytest.raises(type(failure)):
+        GroceryAgent().run(samples.profile(), samples.goals(), {"nutrition": nutrition})
+    assert len(fake.calls) == 1
+
+
+def test_grocery_propagates_refusal():
+    nutrition = _nutrition(["150g chicken breast"])
+    fake = FakeClient(message("", stop_reason="refusal"))
+    llm_client.set_clients(sync=fake)
+    with pytest.raises(LLMRefusalError):
+        GroceryAgent().run(samples.profile(), samples.goals(), {"nutrition": nutrition})
+
+
+def test_grocery_tips_upstream_error_propagates():
+    nutrition = _nutrition(["150g chicken breast"])
+    fake = FakeClient(_grocery_reply, _api_error(401, anthropic.AuthenticationError))
+    llm_client.set_clients(sync=fake)
+    with pytest.raises(anthropic.AuthenticationError):
+        GroceryAgent().run(samples.profile(), samples.goals(), {"nutrition": nutrition})
+
+
+def test_grocery_retries_validation_failure_then_succeeds():
+    nutrition = _nutrition(["150g chicken breast"])
+    fake = FakeClient({"items": "not-a-list"}, _grocery_reply,
+                      {"tips": "not-a-list"}, _grocery_reply)
+    llm_client.set_clients(sync=fake)
+    out = GroceryAgent().run(samples.profile(), samples.goals(), {"nutrition": nutrition})
+    assert out.items_by_category["Proteins"][0].name == "Consolidated"
+    assert out.shopping_notes == ["tip a", "tip b"]
+    assert [_schema_title(c) for c in fake.calls] == [
+        "ConsolidatedItems", "ConsolidatedItems", "ShoppingTips", "ShoppingTips"]
+
+
+def test_grocery_orchestration_reports_upstream_failure():
+    from agents.orchestrator import Orchestrator
+    from agents.schemas import AgentStatus
+    orch = Orchestrator.__new__(Orchestrator)
+    llm_client.set_clients(sync=FakeClient(_api_error(401, anthropic.AuthenticationError)))
+    result = orch._run_agent(agent=GroceryAgent(), agent_name="GroceryAgent",
+                             profile=samples.profile(), goals=samples.goals(),
+                             context={"nutrition": _nutrition(["150g chicken breast"])})
+    output, agent_result = result
+    assert output is None
+    assert agent_result.status == AgentStatus.FAILED
+    assert "401" in (agent_result.error or "")
 
 
 # ── Missing key ───────────────────────────────────────────────────────────────
