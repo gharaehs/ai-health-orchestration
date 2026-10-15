@@ -1,74 +1,97 @@
 # Tasks
 
-## 1. Dependencies and test scaffolding
+## 1. Dependencies, cleanup and offline test harness
 
-- [ ] 1.1 Add `anthropic` to `services/api/requirements.txt`. Verify with `docker compose build api`, which should succeed.
-- [ ] 1.2 Create `requirements-dev.txt` with `pytest`, `anthropic`, `pydantic` and `httpx`, and add a `make test` target that runs `pytest tests/`. Verify that `pip install -r requirements-dev.txt && make test` runs; it may collect 0 tests at this stage.
-- [ ] 1.3 Add `.env.example` with empty `ANTHROPIC_API_KEY=` and `ANTHROPIC_MODEL=` entries. Verify that `git check-ignore .env` still matches and `.env.example` is tracked.
+- [ ] 1.1 Add `anthropic` to `services/api/requirements.txt`, pinned to a minimum version that supports `messages.parse` and `output_config.effort` (D2). Verify that `docker compose build api` succeeds.
+- [ ] 1.2 Create `requirements-dev.txt` (`pytest`, `anthropic`, `pydantic`, `httpx`) and add a `make test` target that runs `pytest tests/`. Verify that `pip install -r requirements-dev.txt && make test` runs.
+- [ ] 1.3 Add `tests/conftest.py` with the autouse offline fixture from D12: a dummy key, a singleton reset, and `socket.connect` blocked. Verify with a test that opens a socket and confirms the fixture makes it fail, and that `make test` passes with networking disabled and `ANTHROPIC_API_KEY` unset.
+- [ ] 1.4 Add `.env.example` with empty `ANTHROPIC_API_KEY=` and `ANTHROPIC_MODEL=`. Verify that `git check-ignore .env` still matches and that `.env.example` is tracked.
+- [ ] 1.5 Delete the top-level `llm/` folder and every `__pycache__` directory outside `node_modules` (decision 1). Verify that `find . -name __pycache__ -not -path "*/node_modules/*"` and `ls llm` both return nothing.
 
 ## 2. Shared LLM client
 
-- [ ] 2.1 Create `agents/llm_client.py`, implementing D3 (lazy config, `DEFAULT_MODEL`, `LLMConfigError`) and D4 (`complete`, `acomplete`, `acomplete_with_usage`, text-block join, optional temperature, `max_tokens` truncation warning, 600 s timeout). Verify with `python -c "import agents.llm_client"` with no key set, which should succeed without raising.
-- [ ] 2.2 Implement `check_health()` with `models.retrieve` (D6). It returns `{"status":"ok","model":id}`, or an error dict that names `ANTHROPIC_API_KEY` when the key is missing. Verify with the tests in 2.3.
-- [ ] 2.3 Write `tests/test_llm_client.py` with a mocked SDK covering every D10 case: default and overridden model, missing-key error text, text-block joining, temperature omitted when `None`, truncation warning, health ok/error, and the key never appearing in logs or health output. Verify that `make test` passes.
-- [ ] 2.4 Confirm the exact Claude Opus 5.5 model ID with `client.models.list()` using a real key, and set `DEFAULT_MODEL`. Verify that `python -c "from agents import llm_client; print(llm_client.check_health())"` prints `status: ok`.
+- [ ] 2.1 Create `agents/llm_client.py` with lazy configuration (`DEFAULT_MODEL = "claude-opus-5-5"`, `LLMConfigError`), the D4 request settings (`effort` `medium`; no `temperature`, `top_p`, `top_k` or `thinking`; `text` blocks selected by type; 600 s timeout) and `complete`/`acomplete`. Verify that `python -c "import agents.llm_client"` succeeds with no key set.
+- [ ] 2.2 Add `generate(system, user, *, schema, max_tokens)` using `messages.parse(output_format=schema)` (D5). It raises `LLMTruncatedError` when `stop_reason` is `max_tokens` and an error when it is `refusal`, and lets `ValidationError` propagate (D6). Verify with the tests in 2.4.
+- [ ] 2.3 Add `check_health()`: check that the key is set, then call `models.retrieve` (D10). Verify with the tests in 2.4.
+- [ ] 2.4 Write `tests/test_llm_client.py` against a fake SDK client. It must cover:
+  - the default `claude-opus-5-5` model and the `ANTHROPIC_MODEL` override
+  - the missing-key error, which must name the variable
+  - the request containing `effort` `medium` and no `temperature`/`top_p`/`top_k`/`thinking`
+  - thinking blocks being ignored
+  - the parsed model being returned from `generate`
+  - `LLMTruncatedError` on `max_tokens`
+  - the refusal error
+  - the `check_health` ok and error shapes, never containing the key, and never calling `messages.create`
 
-## 3. Agents and Orchestration
+  Verify that `make test` passes offline.
 
-- [ ] 3.1 Rewrite `BaseAgent._call_llm` in `agents/base.py` to delegate to `llm_client.complete`. Keep the current system prompt, temperature 0.2, the `MAX_TOKENS_OVERRIDE` lookup and the logging, and remove `VLLM_URL`, `VLLM_MODEL` and the `httpx` import. Verify with a new test in `tests/test_base_agent.py` that a stub agent's `_call_llm` passes its `MAX_TOKENS_OVERRIDE` and system prompt to the mocked client, and that `make test` passes.
-- [ ] 3.2 Remove the `VLLM_URL` monkey-patch and import from `services/api/routes/orchestrate.py`, and update the "on T4" comment. Verify that `grep -rn VLLM agents services/api` returns nothing.
-- [ ] 3.3 Add a test in which `run()` raises an error naming `ANTHROPIC_API_KEY` when the key is unset. Verify that `make test` passes.
+## 3. Agents: structured output and output limits
 
-## 4. RAG pipeline and CLI
+- [ ] 3.1 Add the LLM-facing wrapper models `HalfWeekPlan`, `ConsolidatedItem`/`ConsolidatedItems` and `ShoppingTips` to `agents/schemas.py`, leaving the public contracts unchanged (D5). Verify that `python -c "from agents.schemas import HalfWeekPlan, ConsolidatedItems, ShoppingTips"` succeeds.
+- [ ] 3.2 Rework `BaseAgent` (D5/D6):
+  - `_call_llm` delegates to `llm_client.generate` with the agent's schema and `MAX_TOKENS`, keeping the existing system-prompt intent without the "JSON only" wording.
+  - `run()` retries only on `ValidationError` and never on `LLMTruncatedError`.
+  - Replace `_parse_output` with `_postprocess`.
+  - Remove `_extract_json`, `VLLM_*`, `TEMPERATURE`, `MAX_TOKENS_OVERRIDE` and `httpx`.
 
-- [ ] 4.1 In `rag/pipeline.py`, rename `_call_vllm` to `_call_llm` and route it through `llm_client.complete` (temperature 0.3). Drop the `vllm_url` and `model_name` constructor arguments and the `requests` import, and report the configured model ID wherever the model name was logged or returned. Verify that `python scripts/test_rag.py --help` runs.
-- [ ] 4.2 Remove `--vllm-url` from `scripts/test_rag.py`. Verify that `python scripts/test_rag.py --help` no longer lists it, and that `python scripts/test_rag.py --type meal_plan` returns parsed JSON against the running stack.
-- [ ] 4.3 In `rag/prompt_builder.py`, replace "local, privacy-preserving" with neutral wording and update the Llama/vLLM comments (D12). Verify that `grep -rniE "vllm|llama" rag/` returns nothing.
+  Verify with `tests/test_base_agent.py`, using a stub agent and a fake client. It must show that the schema and `max_tokens` are forwarded, that a validation failure is retried and then fails, and that a truncation fails with no retry. `make test` must pass.
+- [ ] 3.3 Move the Lab Analysis and Training agents to the `LabAnalysisOutput` and `TrainingOutput` schemas, with `MAX_TOKENS` 4096. Remove the JSON-format instructions and schema examples from their prompts. Lab Analysis keeps the guard that clears `analysed_markers` when there are no Blood Markers; drop the list flattening. Verify with tests showing that the no-markers guard still clears the hallucinated markers, and that `grep -nE "_extract_json|JSON only|schema_example" agents/lab_analysis_agent.py agents/training_agent.py` is empty.
+- [ ] 3.4 Move the Nutrition agent to `HalfWeekPlan` for each half-week call, with `MAX_TOKENS` 8192, and keep the merge and average calculation. Verify with a test where two fake half replies merge into a valid 7-day `NutritionOutput`, and a test where a truncated half fails the agent.
+- [ ] 3.5 Move the Grocery agent to `ConsolidatedItems` and `ShoppingTips` with `MAX_TOKENS` 2048, removing the regex extraction and keeping the raw-item and default-tip fallbacks. Verify with tests for the success path and for the fallback when a call fails or is truncated, and that `grep -n "re.search" agents/grocery_agent.py` is empty.
+- [ ] 3.6 Add a test in which `run()` fails with an error naming `ANTHROPIC_API_KEY` when the key is unset. Verify that `make test` passes.
 
-## 5. API service
+## 4. Orchestration scheduling
 
-- [ ] 5.1 Remove `VLLM_URL` and `VLLM_MODEL` from `services/api/core/config.py`. Rename `comparator.call_vllm` to `call_llm`, built on `acomplete_with_usage`, keeping the result dict shape and taking token counts from `usage`. Verify that `/api/chat` returns `base_response` and `rag_response` with non-empty content and an `error` of `null`.
-- [ ] 5.2 Replace the `vllm` check in `/api/health` with `services.llm` from `check_health()`. Verify that `curl localhost:8002/api/health` shows `services.llm.status == "ok"` and the model ID, and has no `vllm` key. Then, with `ANTHROPIC_API_KEY` unset, verify that `llm.status` is `error` and the overall status is `degraded`.
-- [ ] 5.3 Verify the missing-key behavior end to end: with no key, start an Orchestration job through `/api/orchestrate`. The job status should be `failed`, with an error naming `ANTHROPIC_API_KEY`.
+- [ ] 4.1 In `agents/orchestrator.py`, run Nutrition and Training in parallel after Lab Analysis (D7). Each gets its own context copy and runs through `_run_agent`. Their results are appended in the order Nutrition, then Training; Grocery waits for Nutrition. Remove the T4 comment. Verify with `tests/test_orchestrator.py` using stub agents, showing:
+  - both agents start before either finishes (a `threading.Barrier` that would time out if they ran one after the other)
+  - a Training failure does not stop Nutrition or Grocery
+  - Grocery is reported `skipped` when Nutrition fails
+  - the result order is fixed even when Training finishes first
+- [ ] 4.2 In `services/api/routes/orchestrate.py`, remove the `VLLM_URL` import and monkey-patch, keep `max_workers=1`, and change its comment to the cost guard (D8). Verify with a test that submits two jobs to the route's executor with a stub orchestrator and sees the second stay `pending` until the first finishes. `grep -rn VLLM agents services/api` must return nothing.
 
-## 6. Infrastructure and removals
+## 5. Comparator, legacy pipeline and CLI
 
-- [ ] 6.1 In `docker-compose.yml`, delete the `llm` service, remove `llm` from `api.depends_on`, drop `VLLM_URL`, and add the `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` passthrough (D8). Verify that `docker compose config` shows no GPU reservation or `llm` service, and that `make start` brings up all services.
-- [ ] 6.2 Delete `services/llm/`, `scripts/download_model.sh` and `training/`. Remove `make download-model` and the `training/evaluation_results.json` line from `.gitignore`. Verify that `make help` no longer lists `download-model`, and that `grep -rn "download_model\|training/" Makefile docker-compose.yml .gitignore` is empty.
-- [ ] 6.3 Add `scripts/test_llm.py` (it loads `.env` and calls `llm_client.complete`) and point `make test-llm` at it (D9). Verify that `make test-llm` prints a reply and exits 0 with a valid key, and exits non-zero naming `ANTHROPIC_API_KEY` without one.
+- [ ] 5.1 Rename `comparator.call_vllm` to `call_llm`, built on `acomplete` with `max_tokens` 2048. Keep the two calls per chat and the result dict shape, and take token counts from `usage`. Remove `VLLM_URL` and `VLLM_MODEL` from `core/config.py`. Verify with an offline test in which the fake client produces both responses and a truncation sets `error`. Then, live, `/api/chat` must return two non-empty answers with `error` `null`.
+- [ ] 5.2 In `rag/pipeline.py`, rename `_call_vllm` to `_call_llm` via `complete` (`max_tokens` 4096). Drop the `vllm_url`, `model_name`, `temperature` and `requests` constructor arguments, and keep the file (decision 10). Remove `--vllm-url` from `scripts/test_rag.py`. Verify that `python scripts/test_rag.py --help` does not list it, and that `python scripts/test_rag.py --type meal_plan` returns parsed JSON against the running stack.
+- [ ] 5.3 Update `rag/prompt_builder.py` wording and comments (D13). Verify that `grep -rniE "vllm|llama|privacy-preserving" rag/` is empty.
 
-## 7. Frontend
+## 6. API health and smoke test
 
-- [ ] 7.1 In `services/frontend/src/App.tsx`, update the following:
-  - the status label: replace "vLLM :8000" with an Anthropic API label
-  - the header badges: replace "Llama 3.1 8B" with "Claude Opus 5.5" and remove the LoRA badge
-  - the System info rows: drop quantization, LoRA, GPU and the T4 context window
-  - the "~7 min on T4" and "20–60s on T4" hints
+- [ ] 6.1 Replace the `vllm` check in `/api/health` with `services.llm` from `check_health()`. Verify with an offline FastAPI `TestClient` test covering the ok, missing-key and invalid-model cases, all with no `vllm` key. Then, live, `curl localhost:8002/api/health` must show `services.llm.status == "ok"` and `claude-opus-5-5`.
+- [ ] 6.2 Add `scripts/test_llm.py` and point `make test-llm` at it (D10). Verify that `make test-llm` prints a reply and exits 0 with a valid key, and exits non-zero naming `ANTHROPIC_API_KEY` without one.
+- [ ] 6.3 Verify the missing-key path end to end: with no key, start a job through `/api/orchestrate`. The agents must fail with errors naming `ANTHROPIC_API_KEY`, and `/api/health` must report `degraded`.
 
-  Verify that `npm run build` and `npm run lint` pass in `services/frontend`, and that `grep -niE "vllm|llama|lora|T4" services/frontend/src/App.tsx` is empty.
+## 7. Infrastructure removals
 
-## 8. Documentation
+- [ ] 7.1 In `docker-compose.yml`, delete the `llm` service, remove it from `api.depends_on`, drop `VLLM_URL` and add the Anthropic passthrough (D11). Verify that `docker compose config` shows no GPU reservation and no `llm` service, and that `make start` brings every service up.
+- [ ] 7.2 Delete `services/llm/`, `scripts/download_model.sh` and `training/`. Remove `make download-model` and the `training/evaluation_results.json` line from `.gitignore`. Verify that `make help` no longer lists `download-model`, and that `grep -rn "download_model\|training/" Makefile docker-compose.yml .gitignore` is empty.
 
-- [ ] 8.1 Update the README:
-  - Rewrite the architecture diagram, services, prerequisites, setup, commands table and troubleshooting for the Anthropic API.
-  - State that Health Profiles are sent to Anthropic.
-  - Replace the vLLM, LoRA and QLoRA sections with a short pointer to ADR 0001 and git history.
+## 8. Frontend
 
-  Verify that `grep -niE "vllm|download-model|g4dn|T4 " README.md` returns only the historical pointer, and that the documented commands run as written.
-- [ ] 8.2 Update AGENTS.md to match ADR 0001: remove Bedrock, `LLM_PROVIDER`, `BEDROCK_MODEL_ID`, `AWS_REGION`, `make start-vllm` and the vLLM service line, and list `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`. Verify that `grep -niE "bedrock|vllm|LLM_PROVIDER" AGENTS.md` is empty.
-- [ ] 8.3 Create `docs/aws-runbook.md` covering:
-  - a CPU-only EC2 instance (size confirmed with `docker stats` after the stack is running)
-  - a security group restricted to the owner's IP on 3000 and 8002
-  - `.env` setup from `.env.example`
-  - an Anthropic Console spend limit
-  - the rollback steps from design.md
+- [ ] 8.1 In `services/frontend/src/App.tsx`, update:
+  - the status label to show the Anthropic API
+  - the model badge to "Claude Opus 5.5", removing the LoRA badge
+  - the System info rows, dropping quantization, LoRA, GPU and the T4 context window
+  - the T4 timing hints
 
-  Verify by following the runbook on the target instance up to a healthy `/api/health`.
+  Verify that `npm run build` and `npm run lint` pass, and that `grep -niE "vllm|llama|lora|T4" services/frontend/src/App.tsx` is empty.
 
-## 9. Integration verification
+## 9. Documentation
 
-- [ ] 9.1 On a CPU-only host, run `make start`, `make test-llm`, `curl localhost:8002/api/health` and `python scripts/test_orchestration.py`. Verify that all four agents succeed and the output contains a Lab Analysis, Meal Plan, Training Program and Grocery List. Check the logs for `max_tokens` truncation warnings, and raise an agent's `MAX_TOKENS_OVERRIDE` only if any appear.
-- [ ] 9.2 Run a repo-wide check: `grep -rniE "vllm|VLLM_URL|/models/llama" --exclude-dir={node_modules,dist,.git,openspec} .` returns matches only in `REFLECTION.md`, `docs/adr/` and the README history pointer. Also verify that `make test` passes.
+- [ ] 9.1 Update AGENTS.md to match ADR 0001 (decision 1): remove Bedrock, `LLM_PROVIDER`, `BEDROCK_MODEL_ID`, `AWS_REGION`, `make start-vllm`, the vLLM service and `docs/aws-runbook.md`, and add `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`. Verify that `grep -niE "bedrock|vllm|LLM_PROVIDER|aws-runbook" AGENTS.md` is empty and that `docs/aws-runbook.md` does not exist.
+- [ ] 9.2 Add the decision 12 consequence to ADR 0001: Blood Markers, medical history and medications are sent to Anthropic unredacted, with no zero-data-retention agreement, which is accepted for personal/demo use. Verify by reading the ADR's Consequences section.
+- [x] 9.3 Amend decision 5 in `docs/decisions.md`: Opus 5.5 rejects non-default `temperature` and disabling thinking, so requests omit both and pin `effort` to `medium`. Verify that the decision text matches design D4.
+- [ ] 9.4 Rewrite the README for the Anthropic API. Cover the architecture, services, prerequisites, setup, commands (`make test`, `make test-llm`) and troubleshooting. Add a "Deployment (personal/demo)" section on the security group, the spend limit and the health data sent to Anthropic, and replace the vLLM/LoRA sections with a pointer to ADR 0001. Verify that `grep -niE "vllm|download-model|g4dn|bedrock" README.md` returns only the history pointer, and that the documented commands run as written.
+
+## 10. Integration verification
+
+- [ ] 10.1 On a CPU-only host with a real key, run `make start`, `make test-llm`, `curl localhost:8002/api/health` and `python scripts/test_orchestration.py`. Verify that:
+  - all four agents succeed
+  - the logs show Nutrition and Training overlapping
+  - the output contains a Lab Analysis, Meal Plan, Training Program and Grocery List
+
+  If any `LLMTruncatedError` appears, raise only that agent's `MAX_TOKENS` and re-run.
+- [ ] 10.2 Run `make test` with networking disabled; it must pass. Run `grep -rniE "vllm|VLLM_URL|/models/llama|_extract_json" --exclude-dir={node_modules,dist,.git,openspec} .`; it must match only `REFLECTION.md`, `docs/` and the README history pointer.
 
 ## Workflow follow-up
 

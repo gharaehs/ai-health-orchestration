@@ -21,6 +21,10 @@ Settled in the grilling session. Treat as fixed input for the OpenSpec change
    No more "JSON only" prompting plus regex extraction.
 5. **Extended thinking off, temperature 0.2**, to keep latency and cost predictable.
    Verify in the Anthropic API docs that the model accepts a custom temperature.
+   *Amended 2026-10-15 after checking the docs:* `claude-opus-5-5` rejects any non-default
+   `temperature`/`top_p`/`top_k` and cannot disable thinking (adaptive thinking is always on).
+   Requests therefore omit `temperature` and `thinking`, and pin `effort` to `medium`
+   to keep latency and cost predictable.
 6. **Per-agent `max_tokens`.** About 8k for the Meal Plan, smaller for the others.
    A truncated reply is a hard error.
 7. **Nutrition and Training run in parallel** within one Orchestration. Both depend only on
