@@ -5,6 +5,7 @@ import {
   MessageSquare, BarChart2, Database, User, Settings,
   Send, ChevronDown, ChevronUp, Zap, BookOpen, Activity
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar
 } from 'recharts'
@@ -190,14 +191,14 @@ export default function App() {
         }
         // status is 'pending' or 'running' — keep polling
       }
-    } catch (e: any) {
-      setOrchError(e.message)
+    } catch (e: unknown) {
+      setOrchError(e instanceof Error ? e.message : String(e))
     } finally {
       setOrchLoading(false)
     }
   }
 
-  const navItems: Array<{ id: View; icon: any; label: string }> = [
+  const navItems: Array<{ id: View; icon: LucideIcon; label: string }> = [
     { id: 'chat',        icon: MessageSquare, label: 'Chat & Compare' },
     { id: 'orchestrate', icon: Activity,      label: 'Orchestrate' },
     { id: 'analytics',   icon: BarChart2,     label: 'Analytics' },
@@ -232,7 +233,7 @@ export default function App() {
             ))}
           </nav>
           <div className="p-3 border-t border-gray-800 space-y-1.5">
-            <StatusDot label="vLLM :8000" />
+            <StatusDot label="Anthropic API" />
             <StatusDot label="ChromaDB :8001" />
             <StatusDot label="API :8002" />
           </div>
@@ -245,8 +246,7 @@ export default function App() {
             {navItems.find(n => n.id === view)?.label}
           </span>
             <div className="flex items-center gap-2">
-              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">Llama 3.1 8B</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900 text-purple-300">LoRA: health-v1</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-900 text-blue-300">Claude Opus 5.5</span>
             </div>
           </div>
 
@@ -295,7 +295,7 @@ export default function App() {
                   {loading && (
                       <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 text-center text-gray-500">
                         <div className="animate-pulse">Running parallel RAG + base calls…</div>
-                        <div className="text-xs mt-1 text-gray-600">This takes 20–60s on T4</div>
+                        <div className="text-xs mt-1 text-gray-600">This can take up to a minute</div>
                       </div>
                   )}
                   {result && (
@@ -369,7 +369,7 @@ export default function App() {
                         <div className="text-sm font-medium text-white mb-1">Multi-Agent Pipeline</div>
                         <div className="text-xs text-gray-500">
                           Runs 4 agents sequentially: Lab Analysis → Nutrition → Training → Grocery.
-                          Uses health profile from the Profile tab. Takes ~7 min on T4.
+                          Uses health profile from the Profile tab. Takes a few minutes.
                         </div>
                       </div>
                       <button
@@ -426,8 +426,8 @@ export default function App() {
                   {orchLoading && (
                       <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center text-gray-500">
                         <div className="animate-pulse text-base mb-2">Pipeline running…</div>
-                        <div className="text-xs text-gray-600">Each agent calls vLLM with RAG-augmented prompts</div>
-                        <div className="text-xs text-gray-700 mt-1">~7 minutes on T4 · check server logs for progress</div>
+                        <div className="text-xs text-gray-600">Each agent calls Claude with RAG-augmented prompts</div>
+                        <div className="text-xs text-gray-700 mt-1">Takes a few minutes · check server logs for progress</div>
                       </div>
                   )}
 
@@ -740,13 +740,9 @@ export default function App() {
                   </div>
                   <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-2">
                     <div className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-3">System info</div>
-                    <InfoRow label="Model" value="meta-llama/Meta-Llama-3.1-8B-Instruct" />
-                    <InfoRow label="Quantization" value="BitsAndBytes 4-bit (NF4)" />
-                    <InfoRow label="Context window" value="16,384 tokens" />
-                    <InfoRow label="LoRA adapter" value="health-v1 (rank=16, alpha=32)" />
+                    <InfoRow label="Model" value="Claude Opus 5.5 (Anthropic API)" />
                     <InfoRow label="Embedding model" value="all-MiniLM-L6-v2 (CPU)" />
                     <InfoRow label="Vector DB" value="ChromaDB 1.5.8 — 13,349 docs" />
-                    <InfoRow label="GPU" value="NVIDIA Tesla T4 — 16 GB VRAM" />
                   </div>
                 </div>
             )}

@@ -33,11 +33,11 @@ COLLECTION_LABELS = {
 }
 
 # ── System prompt ─────────────────────────────────────────────────────────────
-# Instructs Llama 3.1 to act as a health AI system that grounds its responses
+# Instructs the model to act as a health AI system that grounds its responses
 # in the provided scientific context, and to output valid JSON.
 
-SYSTEM_PROMPT = """You are an AI health assistant integrated into a local, \
-privacy-preserving health orchestration system.
+SYSTEM_PROMPT = """You are an AI health assistant integrated into a \
+health orchestration system.
 
 Your role is to generate evidence-based, structured health plans by combining:
 1. The user's personal health data and goals
@@ -55,7 +55,7 @@ evidence-based defaults and note the assumption."""
 
 @dataclass
 class BuiltPrompt:
-    """The assembled prompt ready to send to vLLM."""
+    """The assembled prompt ready to send to the LLM."""
     system:    str          # System prompt
     user:      str          # User message (query + context)
     strategy:  str          # Which strategy was used
@@ -70,7 +70,7 @@ class HealthPromptBuilder:
     Usage:
         builder = HealthPromptBuilder()
         prompt  = builder.build(query, retrieved_chunks, strategy=PromptStrategy.STRUCTURED)
-        # → prompt.system, prompt.user ready for vLLM
+        # → prompt.system, prompt.user ready for the LLM
     """
 
     def __init__(self, max_context_chars: int = 12_000):
@@ -78,10 +78,9 @@ class HealthPromptBuilder:
         Args:
             max_context_chars: Hard cap on total retrieved context injected into
                                the prompt. At ~4 chars/token this is ~3,000 tokens
-                               of context — safe within the 8,192 context window
-                               used in vLLM, leaving room for the query and output.
-                               Llama 3.1's true limit is 128K, so this can be raised
-                               aggressively if needed.
+                               of context, leaving ample room for the query and
+                               output. The model's context window is far larger,
+                               so this can be raised if needed.
         """
         self.max_context_chars = max_context_chars
 

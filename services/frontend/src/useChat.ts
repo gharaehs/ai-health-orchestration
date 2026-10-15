@@ -1,13 +1,6 @@
 import { useState } from 'react'
 import { ChatResult, HealthProfile } from './types'
 
-const QUERY_TYPES: Record<string, string> = {
-  meal_plan:    'meal_plan',
-  gym_program:  'gym_program',
-  lab_analysis: 'lab_analysis',
-  general:      'general',
-}
-
 function detectQueryType(query: string): string {
   const q = query.toLowerCase()
   if (q.match(/meal|food|eat|protein|carb|calorie|recipe|diet/)) return 'meal_plan'
@@ -40,8 +33,8 @@ export function useChat() {
       if (!res.ok) throw new Error(`API error: ${res.status}`)
       const data: ChatResult = await res.json()
       setResult(data)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }

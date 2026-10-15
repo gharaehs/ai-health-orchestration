@@ -21,7 +21,6 @@ calling HealthRetriever directly — see _retrieve()/_mcp_retrieve() below.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from typing import Any
@@ -64,6 +63,8 @@ class LabAnalysisAgent(BaseAgent):
 
     AGENT_NAME     = "LabAnalysisAgent"
     COLLECTION_KEY = "lab_analysis"   # → public_health_recommendations
+    OUTPUT_SCHEMA  = LabAnalysisOutput
+    MAX_TOKENS     = 4096
 
     # ── Abstract method implementations ──────────────────────────────────────
 
@@ -148,46 +149,16 @@ class LabAnalysisAgent(BaseAgent):
     ) -> str:
         """
         Assemble the full Lab Analysis prompt.
-        The LLM receives: clinical guidelines (RAG) + health profile + output schema.
+        The LLM receives: clinical guidelines (RAG) + health profile; the output
+        structure is enforced through structured output.
         """
         tdee, recommended_calories = self._calculate_calories(profile, goals)
 
         # Track whether real blood markers were submitted. Used both in the
         # prompt instructions below AND as a hard post-generation guard in
-        # _parse_output(), so a hallucinated/copied example can never leak
+        # _postprocess(), so a hallucinated/copied example can never leak
         # into the final output even if the LLM ignores the instruction.
         self._has_blood_markers = bool(profile.blood_markers)
-
-        # NOTE: This is a STRUCTURE-ONLY template. Do not put realistic,
-        # clinically-specific values here (e.g. a real marker name + a
-        # plausible value + a plausible threshold) — models reliably copy
-        # vivid few-shot examples over sparse input data, which is exactly
-        # how a permanent "LDL elevated" hallucination got baked in before.
-        # Keep every field a generic placeholder.
-        schema_example = {
-            "analysed_markers": [
-                {
-                    "name": "<marker name, copied exactly from profile.blood_markers>",
-                    "value": "<numeric value from profile.blood_markers>",
-                    "unit": "<unit from profile.blood_markers>",
-                    "status": "<normal|borderline|elevated|low — your assessment>",
-                    "reference_range": "<range from retrieved guidelines above>",
-                    "interpretation": "<1 sentence>",
-                    "dietary_implication": "<single sentence string, or omit if not applicable>",
-                    "training_implication": "<single sentence string, or omit if not applicable>"
-                }
-            ],
-            "dietary_constraints": [
-                "<actionable bullet point>"
-            ],
-            "training_constraints": [
-                "<actionable bullet point>"
-            ],
-            "estimated_tdee": tdee,
-            "recommended_calories": recommended_calories,
-            "overall_health_summary": "2-3 sentence narrative summary.",
-            "sources_used": ["<source name from retrieved guidelines>"]
-        }
 
         parts = [
             rag_context,
@@ -204,6 +175,10 @@ class LabAnalysisAgent(BaseAgent):
             "- Use ONLY the clinical reference ranges from the retrieved guidelines above.",
             "- If a marker has no guideline in the retrieved context, use standard medical knowledge.",
             "- dietary_constraints and training_constraints must be actionable bullet points.",
+            "- For each analysed marker, copy name, value and unit exactly from the profile,",
+            "  take reference_range from the retrieved guidelines, and keep interpretation,",
+            "  dietary_implication and training_implication to one sentence each.",
+            "- overall_health_summary: a 2-3 sentence narrative summary.",
             "- estimated_tdee and recommended_calories are pre-calculated — use these exact values:",
             f"  estimated_tdee = {tdee} kcal",
             f"  recommended_calories = {recommended_calories} kcal",
@@ -231,38 +206,21 @@ class LabAnalysisAgent(BaseAgent):
                 "",
             ]
 
-        parts += [
-            "Respond with ONLY valid JSON matching this exact schema.",
-            "IMPORTANT: every value shown below (e.g. the marker name, numbers,",
-            "status words, the reference range text) is a PLACEHOLDER describing",
-            "the expected type/shape, NOT real data. Do not copy any of these",
-            "placeholder values into your actual answer.",
-            json.dumps(schema_example, indent=2),
-        ]
         return "\n".join(parts)
 
-    def _parse_output(self, raw: str) -> LabAnalysisOutput:
-        data = self._extract_json(raw)
-
+    def _postprocess(self, output: LabAnalysisOutput) -> LabAnalysisOutput:
         # Hard guard: regardless of what the LLM returned, if the user
         # submitted no blood markers, force an empty analysed_markers list.
         # This makes the "no markers in → no markers out" guarantee a code
         # invariant rather than something that depends on prompt compliance.
-        if not getattr(self, "_has_blood_markers", True):
-            if data.get("analysed_markers"):
-                logger.warning(
-                    f"[{self.AGENT_NAME}] LLM returned {len(data['analysed_markers'])} "
-                    f"analysed_markers with no blood_markers submitted — discarding "
-                    f"(likely hallucinated/copied from schema example)."
-                )
-            data["analysed_markers"] = []
-
-        # Flatten any list fields the LLM emitted as arrays instead of strings
-        for marker in data.get("analysed_markers", []):
-            for field in ("dietary_implication", "training_implication", "interpretation"):
-                if isinstance(marker.get(field), list):
-                    marker[field] = " ".join(marker[field])
-        return LabAnalysisOutput(**data)
+        if not getattr(self, "_has_blood_markers", True) and output.analysed_markers:
+            logger.warning(
+                f"[{self.AGENT_NAME}] LLM returned {len(output.analysed_markers)} "
+                f"analysed_markers with no blood_markers submitted — discarding "
+                f"(likely hallucinated)."
+            )
+            output = output.model_copy(update={"analysed_markers": []})
+        return output
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

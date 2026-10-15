@@ -235,11 +235,6 @@ def main():
         help="Show retrieved chunk previews",
     )
     parser.add_argument(
-        "--vllm-url",
-        default="http://localhost:8000",
-        help="vLLM API base URL (default: http://localhost:8000)",
-    )
-    parser.add_argument(
         "--chroma-host",
         default="localhost",
         help="ChromaDB host (default: localhost)",
@@ -250,7 +245,6 @@ def main():
     # Initialise pipeline
     print("Initialising RAG pipeline...")
     pipeline = HealthRAGPipeline(
-        vllm_url=args.vllm_url,
         chroma_host=args.chroma_host,
         strategy=PromptStrategy.STRUCTURED,
     )

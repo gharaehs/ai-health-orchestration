@@ -1,30 +1,4 @@
 services:
-  llm:
-    build: ./services/llm
-    image: ai-health-orchestration-llm
-    command: [
-      "--model", "/models/llama",
-      "--quantization", "bitsandbytes",
-      "--load-format", "bitsandbytes",
-      "--max-model-len", "16384",
-      "--gpu-memory-utilization", "0.85",
-      "--max-num-seqs", "8",
-      "--enforce-eager",
-      "--dtype", "float16"
-    ]
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./models/llama:/models/llama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-
   vector-db:
     image: chromadb/chroma:latest
     ports:
@@ -40,11 +14,11 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - VLLM_URL=http://llm:8000
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
       - CHROMA_URL=http://vector-db:8000
       - MCP_RAG_URL=http://mcp-rag:8004/mcp
     depends_on:
-        - llm
         - vector-db
         - mcp-rag
     restart: unless-stopped

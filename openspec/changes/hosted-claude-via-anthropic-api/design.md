@@ -26,7 +26,7 @@ What the Anthropic docs say about `claude-opus-5-5` (checked 2026-10-15):
 - **Sampling**: any non-default `temperature`, `top_p` or `top_k` returns a 400 error, and SDK v1.0+ does not accept them.
 - **Thinking**: adaptive thinking is always on, `thinking: disabled` returns a 400 error, and `effort` (default `medium`) controls thinking depth.
 - **Tool choice**: forced tool use (`tool_choice` `any`/`tool`) returns a 400 error.
-- **Structured outputs** (`output_config.format`, SDK `messages.parse(output_format=Model)`) are generally available for this model.
+- **Structured outputs** (`output_config.format` with a JSON schema) are generally available for this model.
 - **Thinking blocks** can come before text blocks, so blocks must be selected by `type`.
 - **`max_tokens`** must leave room for thinking.
 
@@ -63,7 +63,7 @@ Lazily created `anthropic.Anthropic`/`AsyncAnthropic` singletons are cached at m
 - **Alternatives:** a top-level `llm/` package was rejected because it needs extra Dockerfile `COPY` lines and decision 1 deletes the stale `llm/` folder. A provider interface was rejected because ADR 0001 rules out a provider switch.
 
 ### D2. Official `anthropic` SDK (decision 2)
-The SDK gives typed errors, a timeout, retries with backoff on 429/529/5xx (default `max_retries=2`), and `messages.parse`. Pin it to a version that supports `output_config.effort` and structured outputs, and add it to `services/api/requirements.txt` and `requirements-dev.txt`. Raw `httpx` was rejected because it would mean rebuilding all of that.
+The SDK gives typed errors, a timeout, retries with backoff on 429/529/5xx (default `max_retries=2`), and `transform_schema` for structured outputs. Pin it to a version that supports `output_config.effort` and structured outputs, and add it to `services/api/requirements.txt` and `requirements-dev.txt`. Raw `httpx` was rejected because it would mean rebuilding all of that.
 
 ### D3. Configuration is read at first use, not at import (decision 3)
 - `ANTHROPIC_API_KEY` is required. If it is missing or blank, the client raises `LLMConfigError("ANTHROPIC_API_KEY is not set")`.
@@ -86,12 +86,13 @@ Decision 5 asked for "thinking off, temperature 0.2" and for the docs to be chec
 The reply text is the concatenation of the `text` blocks only, selected by `type`; thinking blocks are ignored. The timeout is 600 s.
 - **Alternatives:** `effort=low` gives less reasoning for the Lab Analysis and Meal Plan. A model that accepts `temperature` would contradict decision 3.
 
-### D5. Structured output with `messages.parse(output_format=Model)` (decision 4)
-`generate()` passes the call's Pydantic model as `output_format`. The SDK derives the JSON schema, sends it as `output_config.format`, and validates the reply into `parsed_output`.
+### D5. Structured output with `messages.create` + JSON schema, validated afterwards (decision 4)
+`generate()` sends `anthropic.transform_schema(Model)` as `output_config.format = {"type": "json_schema", "schema": ...}` through `messages.create`. It checks `stop_reason` first, then validates the reply text with `Model.model_validate_json`.
+- **Why not `messages.parse`:** the SDK validates inside `parse`, so a reply cut off at `max_tokens` surfaces as a `ValidationError` before `stop_reason` can be checked, and would be retried instead of failing as truncation (D6). Amended during implementation.
 - **Why not tool use:** forced `tool_choice` returns a 400 error on Opus 5.5, and `auto` does not guarantee a call.
-- **Validation:** the SDK validates with Pydantic, so constraints the schema cannot express (such as `min_length`) are still enforced.
+- **Validation:** Pydantic validates the reply, so constraints the schema cannot express (such as `min_length`) are still enforced.
 - **Retries:** a `pydantic.ValidationError` triggers the existing `MAX_RETRIES=2` loop in `BaseAgent.run()`.
-- **`stop_reason`:** `refusal` raises an error. `max_tokens` is handled by D6.
+- **`stop_reason`:** `refusal` raises an error. `max_tokens` (and `model_context_window_exceeded`) is handled by D6.
 
 LLM-facing models:
 
@@ -209,7 +210,7 @@ Tests inject a fake SDK client through a module-level hook in `llm_client`. `mak
 - **Parallel agents share the retriever and SentenceTransformer.** → Queries are read-only. If task 9.1 shows contention or errors, put a lock around retrieval only; the LLM calls would still overlap.
 - **429/529 errors are more likely with two concurrent calls.** → SDK retries with backoff, then the agent fails visibly.
 - **`/api/health` changes from `services.vllm` to `services.llm` (breaking).** → The only in-repo consumer is the frontend, which does not read that key.
-- **An SDK version without `effort` or `messages.parse`.** → Pin a minimum version in both requirements files.
+- **An SDK version without `effort` or structured outputs.** → Pin a minimum version in both requirements files.
 
 ## Migration Plan
 

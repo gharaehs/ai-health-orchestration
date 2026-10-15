@@ -292,6 +292,31 @@ class GroceryOutput(BaseModel):
     estimated_weekly_cost_eur: Optional[float] = None
 
 
+# ── LLM-facing wrapper models ─────────────────────────────────────────────────
+# Structured-output schemas for individual LLM calls. They are not part of the
+# public pipeline contracts; agents convert them into the models above.
+
+class HalfWeekPlan(BaseModel):
+    """One Nutrition call's output: a subset of the week's days."""
+    days:           list[DayPlan]
+
+
+class ConsolidatedItem(BaseModel):
+    """One consolidated grocery item within a single category."""
+    name:           str
+    total_quantity: str             = Field(..., description="e.g. '700g' or '2 litres'")
+    estimated_cost_eur: Optional[float] = None
+
+
+class ConsolidatedItems(BaseModel):
+    """One Grocery consolidation call's output for a single category."""
+    items:          list[ConsolidatedItem]
+
+
+class ShoppingTips(BaseModel):
+    """The Grocery agent's shopping-tips call output."""
+    tips:           list[str]
+
 # ── Final Orchestration Result ────────────────────────────────────────────────
 
 class AgentStatus(str, Enum):

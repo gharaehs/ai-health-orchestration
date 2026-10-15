@@ -1,23 +1,22 @@
 # AI Health Orchestration
 
 Multi-agent system: health profile + goals -> meal plan, gym program,
-grocery list. Claude Opus 5.5 + RAG (ChromaDB) + MCP server + FastAPI + React/Vite, run with
+grocery list. Claude Opus 5.5 (Anthropic API) + RAG (ChromaDB) + MCP server + FastAPI + React/Vite, run with
 Docker Compose.
 
 ## Layout
 - agents/    four agents + orchestrator, Pydantic contracts in schemas.py,
-  llm_client.py (shared LLM client, LLM_PROVIDER=bedrock|vllm)
+  llm_client.py (shared Anthropic client; every LLM call goes through it)
 - rag/       retriever, prompt builder, pipeline
-- services/  llm (vLLM, opt-in `vllm` profile), mcp-rag (8004), api (FastAPI, 8002), frontend (3000)
+- services/  mcp-rag (8004), api (FastAPI, 8002), frontend (3000)
 - scripts/   corpus ingestion, CLI test tools
-- tests/     pytest unit tests
-- docs/      aws-runbook.md (Bedrock / EC2 deployment)
+- tests/     pytest unit tests (offline; the Anthropic client is faked)
+- docs/      adr/ (architecture decisions), decisions.md
 - models/ and data/ are not in git
 
 ## Commands
 - Start / stop / logs: `make start`, `make stop`, `make logs`
-  (`make start-vllm` for the local vLLM backend)
-- LLM env: `LLM_PROVIDER`, `BEDROCK_MODEL_ID`, `AWS_REGION` (in `.env`)
+- LLM env: `ANTHROPIC_API_KEY` (required), `ANTHROPIC_MODEL` (optional override), in `.env`
 - LLM smoke test: `make test-llm`
 - Unit tests: `pip install -r requirements-dev.txt && make test`
 - Health check: `curl http://localhost:8002/api/health`

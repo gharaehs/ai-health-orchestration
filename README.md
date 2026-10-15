@@ -16,15 +16,17 @@ Built as part of the **AI Technical Deep Dive** mentorship program.
 - [Frontend Dashboard](#frontend-dashboard)
 - [Prerequisites](#prerequisites)
 - [Fresh Server Setup Guide](#fresh-server-setup-guide)
-- [Model Download](#model-download)
+- [Configuration](#configuration)
 - [RAG Corpus Ingestion](#rag-corpus-ingestion)
 - [Running the System](#running-the-system)
 - [Testing & Verification](#testing--verification)
 - [Makefile Reference](#makefile-reference)
+- [Deployment (personal/demo)](#deployment-personaldemo)
 - [Migrating to a New Server](#migrating-to-a-new-server)
 - [Troubleshooting](#troubleshooting)
 - [Module Progress](#module-progress)
 - [Design Decisions](#design-decisions)
+- [History](#history)
 
 ---
 
@@ -34,13 +36,15 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 
 | Module | Topic | Status |
 |--------|-------|--------|
-| Module 1 | Local LLM Deployment & Quantization | ✅ Complete |
-| Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | ✅ Complete |
+| Module 1 | Local LLM Deployment & Quantization | Retired — see [History](#history) |
+| Module 2 | Parameter-Efficient Fine-Tuning (LoRA) | Retired — see [History](#history) |
 | Module 3 | Vector Database & RAG Corpus Ingestion | ✅ Complete |
 | Module 4 | Retrieval-Augmented Generation (RAG) | ✅ Complete |
 | Module 5 | Agentic AI / Multi-Agent Orchestration | ✅ Complete |
 | Module 6 | Model Context Protocol (MCP) | ✅ Complete |
 | Frontend | Analytics Dashboard & Orchestration UI | ✅ Complete |
+
+All LLM calls go to **Claude Opus 5.5** through the Anthropic API ([ADR 0001](docs/adr/0001-hosted-claude-via-anthropic-api.md)), so the whole stack runs on a small CPU-only host.
 
 **Core capabilities:**
 - Ingest structured health data (scale metrics, blood tests, medical history)
@@ -55,44 +59,37 @@ This system implements a multi-module AI pipeline across 6 engineering modules, 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        EC2 g4dn.xlarge                          │
-│                     Ubuntu 22.04 + CUDA 12.2                    │
+                         ┌────────────────────────────────┐
+                         │  Anthropic API                  │
+                         │  Claude Opus 5.5                │
+                         └───────────────▲────────────────┘
+                                         │ HTTPS (ANTHROPIC_API_KEY)
+┌────────────────────────────────────────┼────────────────────────┐
+│                  CPU-only host (Docker Compose)                  │
+│                                        │                         │
+│  ┌──────────────────────┐              │                         │
+│  │   FastAPI Container  │──────────────┘                         │
+│  │   Port: 8002         │                                        │
+│  │                      │    ┌──────────────────────────────┐    │
+│  │  RAG pipeline        │    │   MCP RAG Server (Module 6)   │    │
+│  │  Multi-agent orch.   │◄──►│   Port: 8004                  │    │
+│  │  Async job system    │MCP │   Wraps HealthRetriever        │    │
+│  │  agents/llm_client   │    │   4 named tools + retrieve_    │    │
+│  │  (shared LLM client) │    │   context (collection-routed)  │    │
+│  └──────────┬───────────┘    └──────────────┬───────────────┘    │
+│             │                               ▼                    │
+│             ▼                ┌──────────────────────────────┐    │
+│  ┌──────────────────────┐    │    ChromaDB Container         │    │
+│  │ React/Vite Container │    │    Port: 8001 (host)          │    │
+│  │ Port: 3000           │    │  4 Collections (13,349 docs)  │    │
+│  └──────────────────────┘    └──────────────────────────────┘    │
 │                                                                  │
-│  ┌──────────────────────┐    ┌──────────────────────────────┐   │
-│  │   vLLM Container     │    │    ChromaDB Container         │   │
-│  │   Port: 8000         │    │    Port: 8001 (host)          │   │
-│  │                      │    │    Port: 8000 (internal)      │   │
-│  │  Llama 3.1 8B        │    │  4 Collections (13,349 docs)  │   │
-│  │  Instruct (fp16)     │    │  - public_health_recs         │   │
-│  │  GPU: Tesla T4       │    │  - nutrition_guidelines       │   │
-│  └──────────┬───────────┘    │  - gym_programming            │   │
-│             │                │  - food_and_recipes           │   │
-│             ▼                └──────────────┬───────────────┘   │
-│  ┌──────────────────────┐                   │ (queried only     │
-│  │   FastAPI Container  │                   │  by MCP server)   │
-│  │   Port: 8002         │                   ▼                   │
-│  │                      │    ┌──────────────────────────────┐   │
-│  │  RAG pipeline        │    │   MCP RAG Server (Module 6)   │   │
-│  │  Multi-agent orch.   │◄──►│   Port: 8004                  │   │
-│  │  Async job system    │MCP │   Wraps HealthRetriever        │   │
-│  │  MCP client (Lab,    │    │   4 named tools + retrieve_    │   │
-│  │  Nutrition, Training) │   │   context (collection-routed)  │   │
-│  └──────────────────────┘    └──────────────────────────────┘   │
-│             │                                                    │
-│             ▼                                                    │
-│  ┌──────────────────────┐                                       │
-│  │   React/Vite Container│                                      │
-│  │   Port: 3000          │                                      │
-│  └──────────────────────┘                                       │
-│                                                                  │
-│    ./models/llama/       (mounted volume, not in git)           │
-│    ./models/adapters/    (LoRA adapters, not in git)            │
-│    ./data/chroma/        (mounted volume, persisted to disk)    │
-│    ./data/corpus/        (corpus files, not in git)             │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+│    ./data/chroma/        (mounted volume, persisted to disk)     │
+│    ./data/corpus/        (corpus files, not in git)              │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+Every LLM call (agents, RAG pipeline, Chat & Compare) goes through one shared client, `agents/llm_client.py`. Agents request **structured output**: the client sends the agent's Pydantic contract as a JSON schema, checks `stop_reason` (truncation and refusals fail loudly) and validates the reply with Pydantic, retrying only on validation errors.
 
 **Multi-agent pipeline (Module 5, retrieval updated in Module 6):**
 
@@ -102,19 +99,19 @@ HealthProfile + UserGoals
     ▼
 Orchestrator
     │
-    ├── 1. LabAnalysisAgent  → public_health_recommendations (via MCP server, Module 6)
+    ├── 1. LabAnalysisAgent  → public_health_recommendations (via MCP server)
     │       interprets blood markers against clinical reference ranges
     │       outputs: dietary_constraints, training_constraints, TDEE, target_calories
     │
-    ├── 2. NutritionAgent    → nutrition_guidelines + food_and_recipes (via MCP server, Module 6)
-    │       generates 7-day meal plan (split: Mon–Thu + Fri–Sun)
-    │       consumes: dietary_constraints, recommended_calories from Lab Analysis
+    ├── 2. In parallel (each gets its own copy of the context):
+    │     ├── NutritionAgent → nutrition_guidelines + food_and_recipes (via MCP server)
+    │     │     generates 7-day meal plan (split: Mon–Thu + Fri–Sun)
+    │     │     consumes: dietary_constraints, recommended_calories from Lab Analysis
+    │     └── TrainingAgent  → gym_programming (via MCP server)
+    │           generates weekly gym program (sets, reps, progression)
+    │           consumes: training_constraints from Lab Analysis
     │
-    ├── 3. TrainingAgent     → gym_programming (via MCP server, Module 6)
-    │       generates weekly gym program (sets, reps, progression)
-    │       consumes: training_constraints from Lab Analysis
-    │
-    └── 4. GroceryAgent      → no ChromaDB retrieval — aggregates from NutritionOutput only
+    └── 3. GroceryAgent      → no ChromaDB retrieval — aggregates from NutritionOutput only
             aggregates ingredients across 7 days into shopping list
             uses: per-category LLM consolidation (fuzzy deduplication)
             consumes: weekly_plan from Nutrition Agent
@@ -131,7 +128,7 @@ HealthRAGPipeline (rag/pipeline.py)
     ├── 1. Embed query → sentence-transformers/all-MiniLM-L6-v2 (CPU)
     ├── 2. Retrieve → ChromaDB (port 8001) — collection routed by query type
     ├── 3. Build augmented prompt → STRUCTURED strategy (labelled context blocks)
-    └── 4. Generate → vLLM API (port 8000) → Structured JSON response
+    └── 4. Generate → Anthropic API (via agents/llm_client.py) → Structured JSON response
 ```
 
 **MCP retrieval path (Module 6 — all three retrieval-using agents):**
@@ -157,26 +154,15 @@ Used identically by `LabAnalysisAgent` (`query_type="lab_analysis"`), `Nutrition
 
 ## Infrastructure & Hardware
 
+No GPU is needed: the LLM is hosted by Anthropic, and embeddings run on CPU.
+
 | Component | Specification |
 |-----------|--------------|
-| **Instance** | AWS EC2 g4dn.xlarge |
-| **GPU** | NVIDIA Tesla T4 — 16 GB VRAM |
-| **CPU** | 4 vCPUs |
-| **RAM** | 16 GB |
-| **Storage** | 80 GB SSD (NVMe) |
-| **OS** | Ubuntu 22.04 LTS |
-| **CUDA** | 12.2 |
-| **Driver** | 535.288.01 |
-
-**GPU Memory Usage (Llama 3.1 8B fp16 via vLLM):**
-
-| Component | VRAM Used |
-|-----------|-----------|
-| Llama 3.1 8B (bitsandbytes 4-bit) | ~5.65 GB |
-| KV Cache (PagedAttention) | ~6.8 GB |
-| System overhead | ~0.5 GB |
-| Safety buffer (15%) | ~2.1 GB |
-| **Total available** | **14.58 GB** |
+| **Instance** | Any CPU-only host (e.g. a small AWS EC2 instance) |
+| **RAM** | ~8 GB recommended (the api and mcp-rag images load torch + sentence-transformers) |
+| **Storage** | ~20 GB for images and ChromaDB data |
+| **OS** | Ubuntu 22.04 LTS (or any OS with Docker) |
+| **Network** | Outbound HTTPS to `api.anthropic.com` |
 
 ---
 
@@ -185,24 +171,25 @@ Used identically by `LabAnalysisAgent` (`query_type="lab_analysis"`), `Nutrition
 ```
 ai-health-orchestration/
 │
-├── docker-compose.yml              # Orchestrates all 5 services
+├── docker-compose.yml              # Orchestrates all 4 services
 ├── Makefile                        # Command interface (start, stop, test, etc.)
+├── .env.example                    # ANTHROPIC_API_KEY / ANTHROPIC_MODEL template
+├── requirements-dev.txt            # Offline unit-test dependencies
 ├── .gitignore
 ├── README.md
 │
 ├── agents/                         # ✅ Module 5: Multi-agent orchestration
 │   ├── __init__.py
 │   ├── schemas.py                  # Pydantic I/O contracts for all agents
-│   ├── base.py                     # Abstract BaseAgent: RAG, LLM, retry, JSON parsing
-│   ├── orchestrator.py             # Pipeline coordinator — sequential execution
+│   ├── llm_client.py               # Shared Anthropic client (structured output, health check)
+│   ├── base.py                     # Abstract BaseAgent: RAG, LLM call, validation retry
+│   ├── orchestrator.py             # Pipeline coordinator — Nutrition ∥ Training
 │   ├── lab_analysis_agent.py       # Agent 1: blood marker interpretation — RAG via MCP (Module 6)
 │   ├── nutrition_agent.py          # Agent 2: 7-day meal plan — RAG via MCP (Module 6)
 │   ├── training_agent.py           # Agent 3: weekly gym program — RAG via MCP (Module 6)
 │   └── grocery_agent.py            # Agent 4: per-category shopping list (no RAG/MCP — aggregates from NutritionOutput)
 │
 ├── services/
-│   ├── llm/
-│   │   └── Dockerfile              # vLLM container configuration
 │   ├── mcp-rag/                    # ✅ Module 6: MCP server wrapping RAG corpus
 │   │   ├── Dockerfile              # CPU-only torch — no GPU needed for embeddings
 │   │   └── mcp_server.py           # FastMCP server: 4 named tools + retrieve_context
@@ -216,7 +203,7 @@ ai-health-orchestration/
 │   │   ├── core/
 │   │   │   ├── comparator.py       # asyncio.gather() RAG vs base runner
 │   │   │   ├── metrics.py          # Grounding score, token count helpers
-│   │   │   └── config.py           # Service URLs, timeouts
+│   │   │   └── config.py           # Service URLs
 │   │   └── requirements.txt
 │   └── frontend/                   # ✅ React/Vite dashboard
 │       ├── Dockerfile
@@ -230,10 +217,10 @@ ai-health-orchestration/
 │           └── index.css
 │
 ├── scripts/
-│   ├── download_model.sh           # Downloads Llama 3.1 8B from HuggingFace
 │   ├── ingest.py                   # Module 3: RAG corpus ingestion pipeline
 │   ├── test_rag.py                 # Module 4: RAG pipeline CLI test tool
-│   └── test_orchestration.py       # Module 5: full pipeline CLI test tool
+│   ├── test_orchestration.py       # Module 5: full pipeline CLI test tool
+│   └── test_llm.py                 # `make test-llm`: tiny real Anthropic API call
 │
 ├── rag/                            # Module 4: RAG pipeline
 │   ├── __init__.py
@@ -242,19 +229,11 @@ ai-health-orchestration/
 │   ├── pipeline.py                 # Main RAG orchestration class
 │   └── evaluate.py                 # RAG vs no-RAG evaluation suite
 │
-├── training/
-│   ├── train.py                    # QLoRA fine-tuning script
-│   ├── evaluate.py                 # Base vs fine-tuned comparison
-│   ├── config.yaml                 # Training hyperparameters
-│   ├── evaluation_results.json
-│   └── dataset/
-│       └── processed/
-│           └── health_training_data.jsonl
+├── tests/                          # Offline pytest suite (Anthropic client faked)
 │
-├── models/                         # ⚠️ NOT IN GIT
-│   ├── llama/                      # Llama 3.1 8B Instruct fp16 (~15 GB)
-│   └── adapters/
-│       └── health-v1/              # LoRA adapter from Module 2 (~161 MB)
+├── docs/
+│   ├── adr/                        # Architecture decision records
+│   └── decisions.md
 │
 └── data/
     ├── chroma/                     # ⚠️ NOT IN GIT — vector DB persistent storage
@@ -265,13 +244,13 @@ ai-health-orchestration/
 
 ## Services
 
-### LLM Service — vLLM + Llama 3.1 8B Instruct
+### LLM — Claude Opus 5.5 via the Anthropic API
 
-- **Image:** `vllm/vllm-openai:latest`
-- **Model:** `meta-llama/Meta-Llama-3.1-8B-Instruct` (fp16, on-the-fly 4-bit via BitsAndBytes)
-- **Port:** `8000`
-- **API:** OpenAI-compatible (`/v1/chat/completions`, `/v1/models`)
-- **Runtime flags:** `--dtype float16` · `--max-model-len 16384` · `--gpu-memory-utilization 0.85` · `--enforce-eager` · `--quantization bitsandbytes`
+- **Hosted by:** Anthropic — no LLM container runs locally
+- **Model:** `claude-opus-5-5` (override with `ANTHROPIC_MODEL`)
+- **Client:** `agents/llm_client.py`, used by every agent, the RAG pipeline and Chat & Compare
+- **Auth:** `ANTHROPIC_API_KEY`, passed into the `api` container by `docker-compose.yml`
+- **Output caps:** per-agent `max_tokens` (Lab Analysis / Training 4096, each Nutrition half-week 8192, Grocery 2048, chat 2048); a truncated reply is an error, not a partial result
 
 ### Vector Database — ChromaDB
 
@@ -307,7 +286,7 @@ ai-health-orchestration/
   - `POST /api/orchestrate` — start async pipeline job, returns `{job_id}`
   - `GET /api/orchestrate/status/{job_id}` — poll job status
   - `GET /api/orchestrate/result/{job_id}` — fetch completed result
-  - `GET /api/health` — liveness check
+  - `GET /api/health` — liveness check; the `llm` entry confirms the key is set and the model exists (no tokens spent)
 
 ### Frontend Dashboard — React + Vite
 
@@ -327,7 +306,7 @@ The Orchestrate tab runs the full 4-agent pipeline from the browser:
 3. When status is `"complete"`, browser fetches `/api/orchestrate/result/{job_id}`
 4. Results display in collapsible panels per agent
 
-This async job pattern avoids long-held HTTP connections through the Vite proxy, which cannot hold connections open for 7+ minutes.
+This async job pattern avoids long-held HTTP connections through the Vite proxy, which cannot hold long-running connections open.
 
 **Agent output panels:**
 - **🔬 Lab Analysis** — TDEE, caloric target, dietary constraints, training constraints, per-marker interpretation with status and reference ranges
@@ -370,14 +349,12 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 
 ## Prerequisites
 
-1. **Ubuntu 22.04 LTS**
-2. **NVIDIA GPU drivers** (535+) and **CUDA 12.2**
-3. **Docker** + **Docker Compose plugin**
-4. **NVIDIA Container Toolkit**
-5. **Git**
-6. **Python 3.12 + python3.12-venv**
-7. **HuggingFace account** with Meta Llama 3.1 license accepted
-8. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
+1. **Ubuntu 22.04 LTS** (or any host with Docker)
+2. **Docker** + **Docker Compose plugin**
+3. **Git**
+4. **Python 3.12 + python3.12-venv** (CLI tools and unit tests)
+5. **Anthropic API key** from the [Anthropic Console](https://console.anthropic.com/)
+6. **Node.js + npx** (for MCP Inspector, used to test the Module 6 MCP server standalone)
 
 ---
 
@@ -388,12 +365,7 @@ Returns: Full `OrchestrationResult` with `lab_analysis`, `nutrition`, `training`
 sudo apt update && sudo apt upgrade -y
 ```
 
-### Step 2 — Verify GPU
-```bash
-nvidia-smi
-```
-
-### Step 3 — Install Docker
+### Step 2 — Install Docker
 ```bash
 sudo apt install -y ca-certificates curl gnupg
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -407,19 +379,7 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo usermod -aG docker $USER && newgrp docker
 ```
 
-### Step 4 — Install NVIDIA Container Toolkit
-```bash
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
-  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt update && sudo apt install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-```
-
-### Step 5 — Git + GitHub SSH
+### Step 3 — Git + GitHub SSH
 ```bash
 sudo apt install -y git
 git config --global user.name "Your Name"
@@ -428,12 +388,12 @@ ssh-keygen -t ed25519 -C "your@email.com"
 cat ~/.ssh/id_ed25519.pub   # Add to GitHub → Settings → SSH keys
 ```
 
-### Step 6 — Python venv
+### Step 4 — Python venv
 ```bash
 sudo apt install -y python3.12-venv python-is-python3
 ```
 
-### Step 7 — Clone
+### Step 5 — Clone
 ```bash
 git clone git@github.com:gharaehs/ai-health-orchestration.git
 cd ai-health-orchestration
@@ -441,14 +401,19 @@ cd ai-health-orchestration
 
 ---
 
-## Model Download
+## Configuration
 
 ```bash
-export HF_TOKEN="hf_your_token_here"
-bash scripts/download_model.sh
+cp .env.example .env
+# edit .env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Downloads `meta-llama/Meta-Llama-3.1-8B-Instruct` (~15 GB) to `./models/llama/`.
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `ANTHROPIC_API_KEY` | Yes | Authenticates every LLM call. Never commit it — `.env` is gitignored. |
+| `ANTHROPIC_MODEL` | No | Overrides the default model (`claude-opus-5-5`). |
+
+Docker Compose reads `.env` automatically and passes both variables into the `api` container. If the key is missing, the stack still starts, `/api/health` reports the `llm` entry as an error naming `ANTHROPIC_API_KEY`, and Orchestration jobs fail with the same message.
 
 ---
 
@@ -480,7 +445,7 @@ make logs     # Watch startup logs
 make stop     # Stop all services
 ```
 
-Access: `http://<your-ec2-public-ip>:3000`
+Access: `http://<your-host-ip>:3000`
 
 **MCP server standalone test** (before wiring into agents, or for debugging):
 ```bash
@@ -494,6 +459,19 @@ npx @modelcontextprotocol/inspector
 ---
 
 ## Testing & Verification
+
+### Unit tests (offline)
+```bash
+pip install -r requirements-dev.txt
+make test
+```
+The suite fakes the Anthropic client and blocks network access, so it needs no key and spends nothing.
+
+### LLM smoke test
+```bash
+make test-llm
+```
+Sends one tiny real prompt using the key from the environment or `.env`; prints the reply, or the error and exits non-zero.
 
 ### Health check
 ```bash
@@ -557,9 +535,18 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 | `make start` | Build and start all services |
 | `make stop` | Stop and remove all containers |
 | `make logs` | Follow live logs |
-| `make download-model` | Download Llama 3.1 8B |
-| `make test-llm` | Send test prompt to vLLM |
-| `make build-frontend` | Rebuild api and frontend images |
+| `make test` | Run the offline unit tests |
+| `make test-llm` | Send a tiny real prompt to the Anthropic API |
+
+---
+
+## Deployment (personal/demo)
+
+This stack is meant for a personal/demo deployment only.
+
+- **Security group:** restrict every inbound port (3000, 8001, 8002, 8004, SSH) to the owner's IP. Anyone who can reach the app can trigger paid API calls.
+- **Spend limit:** set a monthly spend limit in the Anthropic Console. The API also runs only one Orchestration at a time, and `/api/health` spends no tokens.
+- **Health data:** Blood Markers, medical history and medications are sent to Anthropic unredacted, with no zero-data-retention agreement (see [ADR 0001](docs/adr/0001-hosted-claude-via-anthropic-api.md)). Don't use it for anyone else's data.
 
 ---
 
@@ -568,19 +555,27 @@ Each agent's own logger (`agents.lab_analysis_agent`, `agents.nutrition_agent`, 
 | Data | In Git? | Migrate how? |
 |------|---------|--------------|
 | Code & config | ✅ Yes | `git clone` |
-| Llama 3.1 model | ❌ No | `bash scripts/download_model.sh` |
-| LoRA adapter | ❌ No | Re-train or `scp` |
+| `.env` (API key) | ❌ No | Recreate from `.env.example` |
 | Vector DB data | ❌ No | `scp ./data/chroma/` or re-run `ingest.py` |
 | Corpus files | ❌ No | `scp ./data/corpus/` |
 
-**Note:** the EC2 instance's public IP changes on stop/start unless an Elastic IP is attached. If services become unreachable after a restart, check the current IP first (`curl -s http://169.254.169.254/latest/meta-data/public-ipv4`) before debugging anything else.
+**Note:** an EC2 instance's public IP changes on stop/start unless an Elastic IP is attached. If services become unreachable after a restart, check the current IP first (`curl -s http://169.254.169.254/latest/meta-data/public-ipv4`) before debugging anything else — and update the security group to your current IP.
 
 ---
 
 ## Troubleshooting
 
-### vLLM OOM on startup
-Ensure `--enforce-eager` is in `docker-compose.yml` command. T4 cannot run CUDA graph warmup.
+### `ANTHROPIC_API_KEY is not set`
+`.env` is missing or the key is empty. Create it from `.env.example`, then `make stop && make start` so the `api` container picks it up. Check with `curl localhost:8002/api/health`.
+
+### 401 / 403 from the Anthropic API
+The key is invalid or revoked. Generate a new one in the Console and update `.env`.
+
+### 429 rate limit or spend-limit errors
+You hit an API rate limit or the Console spend limit. Wait, or raise the limit in the Console.
+
+### `LLMTruncatedError` (reply hit `max_tokens`)
+An agent's output did not fit its `max_tokens` cap. Raise that agent's `MAX_TOKENS` class attribute in `agents/`.
 
 ### ChromaDB collections empty after restart
 Volume must mount `./data/chroma:/data`. Re-run `ingest.py` if data is lost.
@@ -597,9 +592,6 @@ docker builder prune -af
 rm -rf ~/.cache/pip ~/.cache/JetBrains
 ```
 If the failing step is installing `torch`, check whether the container actually needs GPU support. CPU-only containers (e.g. `mcp-rag`) should install torch via `--index-url https://download.pytorch.org/whl/cpu` — the default GPU wheel pulls in ~2.5 GB of unused `nvidia-cuda-*` packages.
-
-### vLLM uses FlashInfer instead of FlashAttention2
-Not an error. T4 (compute 7.5) does not support FlashAttention2 (requires 8.0+).
 
 ### ChromaDB v2 UUID error
 Already handled — `comparator.py` caches name→UUID mapping. Restart api container to clear cache.
@@ -621,21 +613,9 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 
 ## Module Progress
 
-### ✅ Module 1 — Local LLM Deployment
+### Modules 1–2 — Retired
 
-- vLLM serving Llama 3.1 8B via OpenAI-compatible API on port 8000
-- `--enforce-eager` resolves T4 CUDA graph OOM
-
-**Key learnings:** 1B params ≈ 2 GB VRAM · T4 uses FlashInfer · CUDA graph warmup is the OOM culprit
-
----
-
-### ✅ Module 2 — Parameter-Efficient Fine-Tuning / LoRA
-
-- QLoRA: Llama 3.1 8B in 4-bit via BitsAndBytes, LoRA rank=16 alpha=32
-- 21-example health domain dataset, LoRA adapter: `./models/adapters/health-v1/` (~161 MB)
-
-**Key learnings:** AWQ is inference-only · BitsAndBytes NF4 is the correct QLoRA path
+Local LLM deployment and LoRA fine-tuning were completed and later retired by ADR 0001. See [History](#history).
 
 ---
 
@@ -653,6 +633,8 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 - End-to-end RAG: embed → retrieve → augmented prompt → structured JSON
 - Key finding: RAG returns 4-tier LDL classification from corpus; base model returns simplified flat range
 
+Measured on the original self-hosted model (see [History](#history)):
+
 | Metric | With RAG | No RAG |
 |--------|----------|--------|
 | Latency | 58.8s | 37.1s |
@@ -666,37 +648,27 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 **Completed:**
 
 - `agents/schemas.py` — Pydantic I/O contracts for all agents (HealthProfile, UserGoals, LabAnalysisOutput, NutritionOutput, TrainingOutput, GroceryOutput, OrchestrationResult)
-- `agents/base.py` — abstract BaseAgent with shared RAG retrieval, LLM calling, JSON extraction, retry logic
+- `agents/base.py` — abstract BaseAgent with shared RAG retrieval, structured LLM calls via `agents/llm_client.py`, and retry on validation errors
 - `agents/lab_analysis_agent.py` — interprets blood markers against clinical guidelines from ChromaDB; calculates TDEE via Mifflin-St Jeor; outputs dietary and training constraints
-- `agents/nutrition_agent.py` — 7-day meal plan generated in two half-week LLM calls (Mon–Thu, Fri–Sun) to fit within 2048-token output budget; merged and validated as NutritionOutput
+- `agents/nutrition_agent.py` — 7-day meal plan generated in two half-week LLM calls (Mon–Thu, Fri–Sun), merged and validated as NutritionOutput
 - `agents/training_agent.py` — weekly gym program with exercises, sets/reps, rest periods, and 4-week progression scheme grounded in ACSM/NSCA guidelines
 - `agents/grocery_agent.py` — 85 raw ingredients pre-bucketed by keyword into 8 categories; one LLM call per category for fuzzy deduplication and quantity consolidation; final shopping notes via one small LLM call
-- `agents/orchestrator.py` — sequential pipeline coordinator; agents share one ChromaDB connection; each agent's output passed as context to downstream agents; never raises on agent failure
+- `agents/orchestrator.py` — pipeline coordinator; Lab Analysis first, then Nutrition and Training in parallel, then Grocery; each agent's output passed as context to downstream agents; never raises on agent failure
 - `scripts/test_orchestration.py` — CLI test tool with full and minimal profiles, `--output` flag for JSON export
 - `services/api/routes/orchestrate.py` — async job system: `POST /api/orchestrate` returns `job_id` immediately; pipeline runs in `ThreadPoolExecutor`; browser polls `/status/{job_id}` every 10s; result fetched from `/result/{job_id}`
 - `services/frontend/src/App.tsx` — Orchestrate tab with 4-agent progress cards, collapsible result panels per agent, poll-based UI that avoids proxy timeout issues
 
-**Pipeline performance (full profile, 7 blood markers, fat_loss goal):**
-
-| Agent | Collections | Duration |
-|-------|-------------|----------|
-| LabAnalysisAgent | public_health_recommendations | ~62s |
-| NutritionAgent | nutrition_guidelines + food_and_recipes | ~200s (2 LLM calls) |
-| TrainingAgent | gym_programming | ~77s |
-| GroceryAgent | food_and_recipes (per-category) | ~90s (8 LLM calls) |
-| **Total** | | **~430s** |
-
 **Key design decisions:**
 
-- **Sequential with data passing:** Lab Analysis output (dietary/training constraints, caloric target) flows into Nutrition and Training as hard constraints — not parallel, because downstream agents depend on upstream outputs
-- **Split generation for Nutrition:** 7-day JSON exceeds 2048-token output limit; split into Mon–Thu and Fri–Sun calls, merged in Python
+- **Data passing with limited parallelism:** Lab Analysis output (dietary/training constraints, caloric target) flows into Nutrition and Training as hard constraints. Nutrition and Training don't depend on each other, so they run in parallel; Grocery waits for Nutrition
+- **Split generation for Nutrition:** the 7-day plan is generated as Mon–Thu and Fri–Sun calls and merged in Python, keeping each reply well inside its output cap
 - **Per-category consolidation for Grocery:** One LLM call per category (Proteins, Vegetables, etc.) with fuzzy deduplication; Python pre-bucketing reduces each call to 10–20 items, avoiding truncation
-- **Async job pattern for API:** Browser POST returns `job_id` in <1s; pipeline runs server-side; browser polls every 10s — eliminates Vite proxy connection timeout problem for 7-minute requests
+- **Async job pattern for API:** Browser POST returns `job_id` in <1s; pipeline runs server-side; browser polls every 10s — eliminates the Vite proxy connection timeout problem for multi-minute requests
 - **Shared ChromaDB connection:** Orchestrator initialises one `HealthRetriever` shared across all agents — avoids 4× embedding model reload overhead
 
 **Key learnings:**
-- LLM enums must match exactly — Llama returns `"borderline-high"` not `"borderline"`; MarkerStatus enum extended to cover all observed values
-- Nutrition JSON (~13,000 chars) reliably truncates at 2048 tokens — split generation is the correct fix
+- LLM enums must match exactly — the original model returned `"borderline-high"` not `"borderline"`; MarkerStatus enum extended to cover all observed values
+- Nutrition JSON (~13,000 chars) reliably truncated at the original 2048-token cap — split generation fixed it
 - Grocery: keyword pre-bucketing + per-category LLM consolidation handles fuzzy ingredient matching that pure Python string matching cannot
 - Vite proxy drops connections after ~2 min regardless of `timeout: 0` — async job polling is the production-correct pattern
 - Docker build context must be project root (not `services/api/`) to COPY `agents/` and `rag/` into the API container
@@ -746,31 +718,30 @@ Safe in this architecture specifically because `Orchestrator.run()` and `_run_ag
 
 **Remaining:**
 - SSE token streaming (future enhancement)
-- EC2 Security Group lockdown before demo
 
 ---
 
 ## Design Decisions
 
-### Why sequential agents over parallel?
+### Why only Nutrition and Training run in parallel?
 
-Lab Analysis outputs `dietary_constraints` and `training_constraints` that Nutrition and Training must respect. Nutrition outputs the `weekly_plan` that Grocery aggregates. The dependency graph is linear — parallelism would require a merge/reconcile step that adds complexity without benefit on a single T4.
+Lab Analysis outputs `dietary_constraints` and `training_constraints` that Nutrition and Training must respect, so it runs first. Nutrition and Training depend only on Lab Analysis, not on each other, so they run concurrently with separate copies of the context. Grocery aggregates Nutrition's `weekly_plan`, so it runs last.
 
 ### Why split Nutrition generation into two calls?
 
-A 7-day × 3-meal plan with ingredients, instructions, and macros consistently exceeds 2048 tokens. Splitting into Mon–Thu and Fri–Sun generates two valid JSON fragments that Python merges — simpler and more reliable than raising the token limit (which would slow generation significantly on T4).
+A 7-day × 3-meal plan with ingredients, instructions, and macros is a large structured reply. Splitting into Mon–Thu and Fri–Sun keeps each reply well inside its `max_tokens` cap, so truncation (which is now a hard error) stays unlikely, and Python merges the halves.
 
 ### Why per-category LLM consolidation for Grocery?
 
-Simple string matching fails on `"150g chicken breast"` vs `"chicken breast, diced, 200g"`. The LLM handles fuzzy normalisation naturally. Pre-bucketing by keyword (Python, instant) limits each LLM call to 10–20 items — well within 2048 tokens and never truncates.
+Simple string matching fails on `"150g chicken breast"` vs `"chicken breast, diced, 200g"`. The LLM handles fuzzy normalisation naturally. Pre-bucketing by keyword (Python, instant) limits each LLM call to 10–20 items — well within its output cap.
 
 ### Why async job polling instead of a long HTTP request?
 
-Vite's dev server proxy drops connections after ~2 minutes regardless of timeout configuration. A 7-minute pipeline request will always fail through the proxy. The async pattern (POST → job_id → poll status → fetch result) makes every individual HTTP call short, avoiding the proxy entirely as a bottleneck.
+Vite's dev server proxy drops connections after ~2 minutes regardless of timeout configuration. A multi-minute pipeline request will always fail through the proxy. The async pattern (POST → job_id → poll status → fetch result) makes every individual HTTP call short, avoiding the proxy entirely as a bottleneck.
 
-### Why Llama 3.1 8B over Mistral 7B?
+### Why Claude via the Anthropic API?
 
-128K context window vs 4K — essential for RAG with multiple retrieved chunks. Single model for both training (BitsAndBytes QLoRA) and inference (vLLM). AWQ-quantized models like Mistral 7B AWQ cannot be used for LoRA training.
+A hosted frontier model gives far better Lab Analysis, Meal Plans and Training Programs than a small self-hosted model, and removes the GPU instance. The direct Anthropic API gives the newest models and features with minimal setup. See [ADR 0001](docs/adr/0001-hosted-claude-via-anthropic-api.md).
 
 ### Why four separate ChromaDB collections?
 
@@ -778,7 +749,7 @@ Collection-level isolation enforces domain separation cleanly — a Lab Analysis
 
 ### Why CPU for embeddings?
 
-Preserves the full 16 GB T4 VRAM for Llama 3.1 inference. `all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — negligible for this workload.
+`all-MiniLM-L6-v2` on CPU runs at ~0.3s per query — negligible for this workload, and it keeps the host GPU-free.
 
 ### Why expose the RAG corpus as an MCP server, but not the agents themselves?
 
@@ -790,15 +761,20 @@ The initial conversion (NutritionAgent) was deliberately scoped to one agent fir
 
 ---
 
+## History
+
+Modules 1–2 (self-hosted Llama 3.1 8B on vLLM on a g4dn.xlarge GPU instance, plus LoRA fine-tuning) were retired by [ADR 0001](docs/adr/0001-hosted-claude-via-anthropic-api.md); that code lives in git history.
+
+---
+
 ## Links
 
 - **GitHub Repository:** https://github.com/gharaehs/ai-health-orchestration
 - **Mentorship Program:** AI Technical Deep Dive
-- **Model:** https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
-- **vLLM Documentation:** https://docs.vllm.ai
+- **Anthropic API Documentation:** https://docs.anthropic.com
 - **ChromaDB Documentation:** https://docs.trychroma.com
 - **Model Context Protocol:** https://modelcontextprotocol.io
 
 ---
 
-*Last updated: Modules 1–6 complete (Module 6: RAG corpus exposed as MCP server, all three retrieval-using agents — Lab Analysis, Nutrition, Training — converted and verified end-to-end) · Frontend dashboard complete · June 2026*
+*Last updated: LLM moved to Claude Opus 5.5 via the Anthropic API (ADR 0001) · Modules 3–6 and frontend dashboard complete*

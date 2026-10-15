@@ -7,32 +7,31 @@ Abstract base class for all agents in the health orchestration pipeline.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from agents import llm_client
 from agents.schemas import HealthProfile, UserGoals
 
 logger = logging.getLogger(__name__)
 
-VLLM_URL        = "http://localhost:8000/v1/chat/completions"
-VLLM_MODEL      = "/models/llama"
-MAX_TOKENS      = 2048
-TEMPERATURE     = 0.2
-REQUEST_TIMEOUT = 600
-MAX_RETRIES     = 2
+MAX_RETRIES = 2
+
+SYSTEM_PROMPT = (
+    "You are a specialist health AI assistant. Follow the task instructions "
+    "precisely and fill every field of the requested output structure."
+)
 
 
 class BaseAgent(ABC):
 
     AGENT_NAME:     str = "BaseAgent"
     COLLECTION_KEY: str = "full"
+    OUTPUT_SCHEMA:  Optional[type[BaseModel]] = None
+    MAX_TOKENS:     int = 4096
 
     def __init__(self, retriever=None):
         self.retriever = retriever
@@ -42,23 +41,25 @@ class BaseAgent(ABC):
         logger.info(f"[{self.AGENT_NAME}] Starting")
         rag_context = self._retrieve(profile, goals, context)
         prompt = self._build_prompt(profile, goals, context, rag_context)
+        output = self._generate(prompt, self.OUTPUT_SCHEMA, self.MAX_TOKENS)
+        result = self._postprocess(output)
+        logger.info(f"[{self.AGENT_NAME}] Completed successfully")
+        return result
 
+    def _generate(self, prompt: str, schema: type[BaseModel], max_tokens: int) -> BaseModel:
+        """
+        Call the LLM, retrying only when the reply fails Pydantic validation.
+        Truncation and upstream errors propagate immediately (no retry).
+        """
         for attempt in range(1, MAX_RETRIES + 1):
-            raw = self._call_llm(prompt, attempt)
             try:
-                result = self._parse_output(raw)
-                logger.info(f"[{self.AGENT_NAME}] Completed successfully")
-                return result
-            except (json.JSONDecodeError, ValueError) as e:
+                return self._call_llm(prompt, schema, max_tokens, attempt)
+            except ValidationError as e:
                 logger.warning(
-                    f"[{self.AGENT_NAME}] Parse failed (attempt {attempt}/{MAX_RETRIES}): {e}"
+                    f"[{self.AGENT_NAME}] Validation failed (attempt {attempt}/{MAX_RETRIES}): {e}"
                 )
                 if attempt == MAX_RETRIES:
-                    raise RuntimeError(
-                        f"[{self.AGENT_NAME}] Failed to parse valid JSON after "
-                        f"{MAX_RETRIES} attempts. Last error: {e}\n"
-                        f"Raw response (first 500 chars):\n{raw[:500]}"
-                    )
+                    raise
 
     @abstractmethod
     def _build_query(self, profile, goals, context) -> str:
@@ -68,9 +69,9 @@ class BaseAgent(ABC):
     def _build_prompt(self, profile, goals, context, rag_context) -> str:
         """Assemble the complete prompt to send to the LLM."""
 
-    @abstractmethod
-    def _parse_output(self, raw: str) -> BaseModel:
-        """Extract and validate JSON from the raw LLM response string."""
+    def _postprocess(self, output: BaseModel) -> BaseModel:
+        """Adjust the validated LLM output before returning it."""
+        return output
 
     def _retrieve(self, profile, goals, context) -> str:
         if self.retriever is None:
@@ -110,53 +111,18 @@ class BaseAgent(ABC):
             logger.error(f"[{self.AGENT_NAME}] Retrieval error: {e}")
             return ""
 
-    def _call_llm(self, prompt: str, attempt: int = 1) -> str:
+    def _call_llm(
+        self,
+        prompt: str,
+        schema: type[BaseModel],
+        max_tokens: int,
+        attempt: int = 1,
+    ) -> BaseModel:
         logger.info(
-            f"[{self.AGENT_NAME}] Calling vLLM "
-            f"(attempt {attempt}, prompt_len={len(prompt)})"
+            f"[{self.AGENT_NAME}] Calling LLM for {schema.__name__} "
+            f"(attempt {attempt}, prompt_len={len(prompt)}, max_tokens={max_tokens})"
         )
-        payload = {
-            "model": VLLM_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a specialist health AI assistant. "
-                        "You always respond with valid JSON only — "
-                        "no prose, no markdown fences, no explanations outside the JSON."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": getattr(self, "MAX_TOKENS_OVERRIDE", MAX_TOKENS),
-            "temperature": TEMPERATURE,
-        }
-
-        t0 = time.time()
-        with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-            response = client.post(VLLM_URL, json=payload)
-            response.raise_for_status()
-
-        elapsed = time.time() - t0
-        data = response.json()
-        raw = data["choices"][0]["message"]["content"].strip()
-
-        logger.info(f"[{self.AGENT_NAME}] vLLM response in {elapsed:.1f}s ({len(raw)} chars)")
-        return raw
-
-    def _extract_json(self, raw: str) -> dict:
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-        if fenced:
-            return json.loads(fenced.group(1))
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-        start = raw.find("{")
-        end   = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(raw[start:end + 1])
-        raise json.JSONDecodeError("No JSON object found in response", raw, 0)
+        return llm_client.generate(SYSTEM_PROMPT, prompt, schema=schema, max_tokens=max_tokens)
 
     def _format_profile(self, profile: HealthProfile) -> str:
         lines = [

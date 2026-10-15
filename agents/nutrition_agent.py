@@ -10,8 +10,9 @@ recipes retrieved from two ChromaDB collections:
 
 Receives dietary_constraints and recommended_calories from LabAnalysisOutput.
 
-Strategy: generates in TWO half-week calls (Mon-Thu, Fri-Sun) to avoid
-hitting the 2048 token limit with a full 7-day JSON in one response.
+Strategy: generates in TWO half-week calls (Mon-Thu, Fri-Sun), each a
+schema-constrained HalfWeekPlan capped at MAX_TOKENS, so a full 7-day plan
+plus the model's thinking never sits close to a single call's output limit.
 Results are merged into a full NutritionOutput.
 
 Module 6 (MCP): retrieval is routed through the mcp-rag server instead of
@@ -35,6 +36,7 @@ from agents.schemas import (
     UserGoals,
     LabAnalysisOutput,
     NutritionOutput,
+    HalfWeekPlan,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,12 +51,14 @@ class NutritionAgent(BaseAgent):
 
     AGENT_NAME     = "NutritionAgent"
     COLLECTION_KEY = "meal_plan"   # → nutrition_guidelines + food_and_recipes
+    OUTPUT_SCHEMA  = HalfWeekPlan
+    MAX_TOKENS     = 8192          # per half-week call
 
     # ── Override base run() to split into two LLM calls ──────────────────────
 
     def run(self, profile, goals, context=None):
         """
-        Generate the meal plan in two halves to stay within token limits:
+        Generate the meal plan in two halves to stay within the output limit:
           Call 1: Monday–Thursday (4 days)
           Call 2: Friday–Sunday   (3 days)
         Then merge into a full 7-day NutritionOutput.
@@ -70,19 +74,21 @@ class NutritionAgent(BaseAgent):
 
         # ── Half 1: Mon–Thu ───────────────────────────────────────────────────
         logger.info(f"[{self.AGENT_NAME}] Generating Mon–Thu")
-        raw1 = self._call_llm(
+        half1 = self._generate(
             self._build_half_prompt(profile, goals, rag_context,
-                                    constraints_block, target_calories, WEEK_HALF_1)
+                                    constraints_block, target_calories, WEEK_HALF_1),
+            HalfWeekPlan, self.MAX_TOKENS,
         )
 
         # ── Half 2: Fri–Sun ───────────────────────────────────────────────────
         logger.info(f"[{self.AGENT_NAME}] Generating Fri–Sun")
-        raw2 = self._call_llm(
+        half2 = self._generate(
             self._build_half_prompt(profile, goals, rag_context,
-                                    constraints_block, target_calories, WEEK_HALF_2)
+                                    constraints_block, target_calories, WEEK_HALF_2),
+            HalfWeekPlan, self.MAX_TOKENS,
         )
 
-        result = self._merge_and_parse(raw1, raw2, target_calories, goals, lab)
+        result = self._merge(half1, half2, target_calories, goals, lab)
         logger.info(f"[{self.AGENT_NAME}] Completed successfully")
         return result
 
@@ -159,10 +165,6 @@ class NutritionAgent(BaseAgent):
         # Not used — we use _build_half_prompt instead
         pass
 
-    def _parse_output(self, raw: str) -> NutritionOutput:
-        # Not used — we use _merge_and_parse instead
-        pass
-
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _get_target_calories(self, goals, lab):
@@ -181,31 +183,6 @@ class NutritionAgent(BaseAgent):
         """Build a prompt for a subset of days only."""
         days_str = ", ".join(days)
         n_days   = len(days)
-
-        schema_example = {
-            "days": [
-                {
-                    "day": days[0],
-                    "meals": [
-                        {
-                            "name": "Breakfast",
-                            "recipe_name": "Overnight Oats with Berries",
-                            "ingredients": ["80g rolled oats", "200ml skimmed milk", "100g mixed berries"],
-                            "instructions": "Combine oats and milk overnight. Top with berries.",
-                            "calories_kcal": 420,
-                            "protein_g": 18.0,
-                            "carbs_g": 68.0,
-                            "fat_g": 6.0,
-                            "notes": "High soluble fibre"
-                        }
-                    ],
-                    "total_calories": target_calories,
-                    "total_protein_g": 150.0,
-                    "total_carbs_g": 200.0,
-                    "total_fat_g": 65.0
-                }
-            ]
-        }
 
         parts = [
             rag_context,
@@ -229,19 +206,16 @@ class NutritionAgent(BaseAgent):
             "- Ingredients must include quantity and unit (e.g. '150g chicken breast').",
             "- Vary recipes — do not repeat the same recipe twice.",
             "- Keep instructions brief (1-2 sentences).",
-            "",
-            f"Respond with ONLY valid JSON with a 'days' array of exactly {n_days} entries:",
-            json.dumps(schema_example, indent=2),
+            "- Give per-meal calories and macros, and per-day totals for calories,",
+            "  protein, carbs and fat.",
         ]
         return "\n".join(parts)
 
-    def _merge_and_parse(self, raw1, raw2, target_calories, goals, lab) -> NutritionOutput:
-        """Merge two half-week responses into a full NutritionOutput."""
-        data1 = self._extract_json(raw1)
-        data2 = self._extract_json(raw2)
-
-        days1 = data1.get("days", [])
-        days2 = data2.get("days", [])
+    def _merge(self, half1: HalfWeekPlan, half2: HalfWeekPlan,
+               target_calories, goals, lab) -> NutritionOutput:
+        """Merge two half-week plans into a full NutritionOutput."""
+        days1 = half1.days
+        days2 = half2.days
         all_days = days1 + days2
 
         logger.info(f"[{self.AGENT_NAME}] Merging: {len(days1)} + {len(days2)} = {len(all_days)} days")
@@ -252,22 +226,12 @@ class NutritionAgent(BaseAgent):
                 f"({len(days1)} from first call, {len(days2)} from second)"
             )
 
-        # Build weekly_plan in the DayPlan schema format
-        weekly_plan = []
-        for day_data in all_days[:7]:
-            weekly_plan.append({
-                "day":             day_data["day"],
-                "meals":           day_data["meals"],
-                "total_calories":  day_data.get("total_calories", target_calories),
-                "total_protein_g": day_data.get("total_protein_g", 0.0),
-                "total_carbs_g":   day_data.get("total_carbs_g", 0.0),
-                "total_fat_g":     day_data.get("total_fat_g", 0.0),
-            })
+        weekly_plan = all_days[:7]
 
-        avg_cal  = sum(d["total_calories"]  for d in weekly_plan) // 7
-        avg_prot = round(sum(d["total_protein_g"] for d in weekly_plan) / 7, 1)
-        avg_carb = round(sum(d["total_carbs_g"]   for d in weekly_plan) / 7, 1)
-        avg_fat  = round(sum(d["total_fat_g"]     for d in weekly_plan) / 7, 1)
+        avg_cal  = sum(d.total_calories  for d in weekly_plan) // 7
+        avg_prot = round(sum(d.total_protein_g for d in weekly_plan) / 7, 1)
+        avg_carb = round(sum(d.total_carbs_g   for d in weekly_plan) / 7, 1)
+        avg_fat  = round(sum(d.total_fat_g     for d in weekly_plan) / 7, 1)
 
         goal_label = goals.primary_goal.value.replace("_", " ")
         constraint_notes = []

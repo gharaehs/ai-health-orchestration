@@ -19,7 +19,6 @@ calling HealthRetriever directly — see _retrieve()/_mcp_retrieve() below.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from typing import Any
@@ -56,6 +55,8 @@ class TrainingAgent(BaseAgent):
 
     AGENT_NAME     = "TrainingAgent"
     COLLECTION_KEY = "gym_program"   # → gym_programming collection
+    OUTPUT_SCHEMA  = TrainingOutput
+    MAX_TOKENS     = 4096
 
     def _build_query(
         self,
@@ -144,46 +145,6 @@ class TrainingAgent(BaseAgent):
         level = goals.fitness_level.value
         goal  = goals.primary_goal.value.replace("_", " ")
 
-        # Build a sample session for the schema example
-        schema_example = {
-            "weekly_program": [
-                {
-                    "day": "Monday",
-                    "session_type": "Upper Body Strength",
-                    "duration_minutes": 60,
-                    "warmup": "5 min light cardio + dynamic shoulder and thoracic mobility",
-                    "exercises": [
-                        {
-                            "name": "Barbell Bench Press",
-                            "sets": 4,
-                            "reps": "6-8",
-                            "rest_seconds": 120,
-                            "notes": "RPE 7-8; focus on controlled eccentric"
-                        },
-                        {
-                            "name": "Dumbbell Row",
-                            "sets": 4,
-                            "reps": "8-10",
-                            "rest_seconds": 90,
-                            "notes": "Neutral spine throughout"
-                        }
-                    ],
-                    "cooldown": "5 min static stretching — chest, lats, shoulders"
-                }
-            ],
-            "rest_days": ["Wednesday", "Sunday"],
-            "progression_scheme": {
-                "principle": "Linear periodisation",
-                "week_2_adjustment": "Add 2.5 kg to all compound lifts if RPE < 8",
-                "week_3_adjustment": "Add 2.5 kg again; increase sets from 4 to 5 on primary lifts",
-                "week_4_adjustment": "Deload — reduce weight by 40%, keep same sets/reps"
-            },
-            "constraint_adherence": [
-                "High-intensity interval cardio replaced with moderate-intensity steady-state (elevated CRP)"
-            ],
-            "sources_used": ["ACSM Position Stand", "NSCA Strength Training Guidelines"]
-        }
-
         parts = [
             rag_context,
             "",
@@ -210,12 +171,5 @@ class TrainingAgent(BaseAgent):
             "- Ground recommendations in the retrieved ACSM/NSCA guidelines above.",
             "- constraint_adherence: explain how each training constraint was addressed.",
             "- sources_used: list source names from the retrieved guidelines.",
-            "",
-            "Respond with ONLY valid JSON matching this exact schema:",
-            json.dumps(schema_example, indent=2),
         ]
         return "\n".join(parts)
-
-    def _parse_output(self, raw: str) -> TrainingOutput:
-        data = self._extract_json(raw)
-        return TrainingOutput(**data)

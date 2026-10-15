@@ -7,3 +7,4 @@ All LLM calls go to Claude Opus 5.5 through the direct Anthropic API, replacing 
 - The local-LLM code (vLLM service, model download, `training/`) is removed; git history is its archive.
 - No runtime provider switch: one shared client talks only to Anthropic.
 - Cost is now per-token and exposed to anyone who can reach the app, so the security group is locked to the owner's IP and a spend limit is set in the Anthropic Console.
+- Health data leaves the server: Blood Markers, medical history and medications are sent to Anthropic unredacted, with no zero-data-retention agreement. This is accepted for a personal/demo deployment only.

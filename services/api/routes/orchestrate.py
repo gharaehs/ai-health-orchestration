@@ -25,13 +25,14 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from agents import llm_client
 from agents.orchestrator import Orchestrator
 from agents.schemas import (
     HealthProfile,
     UserGoals,
     OrchestrationResult,
 )
-from core.config import VLLM_URL, CHROMA_URL
+from core.config import CHROMA_URL
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -48,7 +49,7 @@ class Job(BaseModel):
     result: Optional[OrchestrationResult] = None
 
 _jobs: dict[str, Job] = {}
-_executor = ThreadPoolExecutor(max_workers=1)  # One pipeline at a time on T4
+_executor = ThreadPoolExecutor(max_workers=1)  # Cost guard: one Orchestration at a time
 
 
 # ── Orchestrator singleton ────────────────────────────────────────────────────
@@ -62,9 +63,6 @@ def _get_chroma_host_port() -> tuple[str, int]:
 
 
 _chroma_host, _chroma_port = _get_chroma_host_port()
-
-import agents.base as _agent_base
-_agent_base.VLLM_URL = f"{VLLM_URL}/v1/chat/completions"
 
 _orchestrator: Optional[Orchestrator] = None
 
@@ -87,6 +85,7 @@ def _run_pipeline(job_id: str, profile: HealthProfile, goals: UserGoals):
     job = _jobs[job_id]
     job.status = "running"
     try:
+        llm_client.get_api_key()  # fail the job up front, naming the missing key
         orchestrator = get_orchestrator()
         result = orchestrator.run(profile, goals)
         job.result = result

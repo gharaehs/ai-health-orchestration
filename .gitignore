@@ -16,4 +16,3 @@ data/corpus/
 data/corpus/**
 !data/corpus/**/.gitkeep
 .idea/
-training/evaluation_results.json
