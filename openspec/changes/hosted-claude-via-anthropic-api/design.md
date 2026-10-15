@@ -184,7 +184,7 @@ Add `tests/conftest.py` with an autouse fixture that:
 - resets the client singletons
 - makes `socket.socket.connect` raise, so any accidental live call fails the test
 
-Tests inject a fake SDK client through a module-level hook in `llm_client`. `make test` runs `pytest tests/`. `requirements-dev.txt` contains `pytest`, `anthropic`, `pydantic` and `httpx`. Live calls happen only in `make test-llm` and `scripts/test_orchestration.py`.
+Tests inject a fake SDK client through a module-level hook in `llm_client`. `make test` runs `pytest tests/`. `requirements-dev.txt` contains `pytest`, `anthropic`, `pydantic`, `httpx` and `fastapi` (for the API route and health tests). Live calls happen only in `make test-llm` and `scripts/test_orchestration.py`.
 
 ### D13. Removals and documentation (decisions 1, 12)
 - **Delete:** `services/llm/`, `scripts/download_model.sh`, `training/`, the top-level `llm/` folder and every `__pycache__` directory outside `node_modules`. `__pycache__` is already in `.gitignore`. Also drop `make download-model` and the `training/evaluation_results.json` line from `.gitignore`.
